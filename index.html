@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>交易進度 · HyperGrok</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230c0e12'/%3E%3Cpath d='M7 22 V10 h3.2 v4.6 h5.2 V10 H18.6 v12 h-3.2 v-4.8 h-5.2 V22z' fill='%23d4a574'/%3E%3Crect x='21' y='18' width='4' height='4' fill='%233dcb8a'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #0c0e12;
+      --bg-elev: #14171e;
+      --bg-elev-2: #1b1f28;
+      --line: #2a303c;
+      --line-soft: #22262f;
+      --text: #e8e6e1;
+      --muted: #8b909a;
+      --faint: #5c616b;
+      --gold: #d4a574;
+      --gold-dim: rgba(212, 165, 116, 0.14);
+      --green: #3dcb8a;
+      --green-dim: rgba(61, 203, 138, 0.14);
+      --red: #f07167;
+      --red-dim: rgba(240, 113, 103, 0.14);
+      --blue: #7aa2c8;
+      --warn: #e0b25a;
+      --shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 12px 32px rgba(0,0,0,0.28);
+      --radius: 14px;
+      --mono: "SF Mono", "Menlo", "Consolas", "Noto Sans Mono", ui-monospace, monospace;
+      --sans: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", ui-sans-serif, system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+    body {
+      min-height: 100vh;
+      background-image:
+        radial-gradient(1200px 500px at 10% -10%, rgba(212,165,116,0.06), transparent 50%),
+        radial-gradient(800px 400px at 100% 0%, rgba(61,203,138,0.04), transparent 45%);
+    }
+    a { color: var(--gold); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 20px 18px 64px; }
+    header.top {
+      display: flex; flex-wrap: wrap; gap: 14px 20px;
+      align-items: flex-start; justify-content: space-between;
+      padding-bottom: 18px; border-bottom: 1px solid var(--line-soft);
+      margin-bottom: 20px;
+    }
+    .brand { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .brand h1 {
+      margin: 0; font-size: 22px; font-weight: 650; letter-spacing: 0.02em;
+    }
+    .brand h1 span { color: var(--gold); font-weight: 500; }
+    .note {
+      display: inline-flex; align-items: center; gap: 8px;
+      color: var(--muted); font-size: 13px; line-height: 1.5;
+    }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px; border-radius: 999px;
+      background: var(--gold-dim); color: var(--gold);
+      font-size: 12px; letter-spacing: 0.04em; white-space: nowrap;
+    }
+    .meta { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; text-align: right; }
+    .status-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: flex-end; }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--faint); box-shadow: 0 0 0 3px rgba(92,97,107,0.2);
+    }
+    .dot.ok { background: var(--green); box-shadow: 0 0 0 3px var(--green-dim); }
+    .dot.busy { background: var(--warn); box-shadow: 0 0 0 3px rgba(224,178,90,0.2); animation: pulse 1s ease-in-out infinite; }
+    .dot.err { background: var(--red); box-shadow: 0 0 0 3px var(--red-dim); }
+    @keyframes pulse { 50% { opacity: 0.45; } }
+    .status-text { font-size: 13px; color: var(--muted); }
+    .updated { font-size: 12px; color: var(--faint); }
+    .addr {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: var(--mono); font-size: 12px; color: var(--muted);
+    }
+    .btn {
+      appearance: none; border: 1px solid var(--line); background: var(--bg-elev-2);
+      color: var(--text); border-radius: 8px; padding: 5px 10px; font: inherit;
+      font-size: 12px; cursor: pointer;
+    }
+    .btn:hover { border-color: var(--gold); color: var(--gold); }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    .grid { display: grid; gap: 14px; }
+    .cards { grid-template-columns: repeat(3, 1fr); }
+    .card {
+      background: var(--bg-elev); border: 1px solid var(--line-soft);
+      border-radius: var(--radius); padding: 16px 16px 14px; box-shadow: var(--shadow);
+    }
+    .card.span-2 { grid-column: span 2; }
+    section.block { margin-top: 8px; }
+    .block-head {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+      margin: 6px 2px 10px;
+    }
+    .block-head h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: 0.06em; }
+    .block-head .sub { color: var(--faint); font-size: 12px; }
+    .label { color: var(--muted); font-size: 12px; letter-spacing: 0.04em; }
+    .value { font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 600; margin-top: 6px; letter-spacing: 0.01em; }
+    .value.sm { font-size: 18px; }
+    .hint { margin-top: 6px; color: var(--faint); font-size: 11px; line-height: 1.5; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+    .side-long, .badge-long { color: var(--green); }
+    .side-short, .badge-short { color: var(--red); }
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+    th { color: var(--faint); font-weight: 550; font-size: 11px; letter-spacing: 0.06em; }
+    td.num, th.num { text-align: right; }
+    tbody tr:hover td { background: rgba(255,255,255,0.015); }
+    .empty {
+      color: var(--muted); font-size: 13px; padding: 22px 8px; text-align: center;
+    }
+    .limits {
+      display: flex; flex-wrap: wrap; gap: 8px;
+    }
+    .chip {
+      background: var(--bg-elev-2); border: 1px solid var(--line);
+      border-radius: 999px; padding: 5px 10px; font-size: 12px; color: var(--muted);
+    }
+    .chip b { color: var(--text); font-weight: 600; }
+    .pnl-hero { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: end; }
+    .bar-wrap { margin-top: 16px; }
+    .bar-track {
+      height: 10px; background: var(--bg-elev-2); border-radius: 99px; overflow: hidden;
+      border: 1px solid var(--line);
+    }
+    .bar-fill { height: 100%; width: 0; border-radius: 99px; transition: width 0.4s ease; background: var(--green); }
+    .bar-fill.warn { background: var(--warn); }
+    .bar-fill.stop { background: var(--red); }
+    .bar-meta { display: flex; justify-content: space-between; margin-top: 7px; font-size: 12px; color: var(--muted); }
+    .banner {
+      display: none; margin: 0 0 16px; padding: 10px 14px; border-radius: 10px;
+      background: var(--red-dim); color: #f5b7b2; border: 1px solid rgba(240,113,103,0.3);
+      font-size: 13px;
+    }
+    .banner.show { display: block; }
+    footer {
+      margin-top: 28px; color: var(--faint); font-size: 11px; line-height: 1.6;
+    }
+    @media (max-width: 800px) {
+      .cards { grid-template-columns: 1fr 1fr; }
+      .card.span-2 { grid-column: span 2; }
+      .pnl-hero { grid-template-columns: 1fr; }
+      .meta { align-items: flex-start; text-align: left; width: 100%; }
+      .status-row { justify-content: flex-start; }
+      .value { font-size: 20px; }
+    }
+    @media (max-width: 520px) {
+      .cards { grid-template-columns: 1fr; }
+      .card.span-2 { grid-column: span 1; }
+      .wrap { padding: 16px 12px 48px; }
+      .block-head h2 { flex: 0 0 auto; white-space: nowrap; }
+      .block-head .sub { min-width: 0; }
+      .bar-meta { flex-direction: column; align-items: stretch; gap: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <h1>交易進度 <span>HyperGrok 交易台</span></h1>
+        <div class="note">
+          <span class="pill">唯讀</span>
+          <span>唯讀頁面，只讀公開資料，不能下單。</span>
+        </div>
+        <div class="addr">
+          <span id="addr-short"></span>
+          <button class="btn" type="button" id="copy-btn">複製地址</button>
+          <a id="explorer" target="_blank" rel="noopener noreferrer">在 Hyperliquid 查看</a>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="status-row">
+          <span class="dot" id="dot"></span>
+          <span class="status-text" id="status">尚未連線</span>
+          <button class="btn" type="button" id="refresh-btn">立即更新</button>
+        </div>
+        <div class="updated" id="updated">最後更新：—</div>
+        <div class="updated" id="countdown">每 15 秒自動更新</div>
+      </div>
+    </header>
+
+    <div class="banner" id="banner"></div>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>帳戶概況</h2>
+        <div class="sub" id="mode-label">帳戶模式：讀取中</div>
+      </div>
+      <div class="grid cards" id="overview"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>風險限額</h2>
+        <div class="sub">由你在 Risk Manager 設定，此處只做展示、不會改動</div>
+      </div>
+      <div class="card">
+        <div class="limits">
+          <span class="chip">每筆風險 <b>0.5%</b></span>
+          <span class="chip">總風險 <b>4%</b></span>
+          <span class="chip">最高槓桿 <b>3 倍</b></span>
+          <span class="chip">最多同時持倉 <b>4 倉</b></span>
+          <span class="chip">只做 <b>BTC / ETH / SOL / HYPE</b> 永續</span>
+          <span class="chip">每日停損 <b>-2%</b>（以 $20 計為 -$0.40）</span>
+          <span class="chip">滑價 <b>10 bps</b></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>今日損益</h2>
+        <div class="sub">自當日 00:00 台北時間起，以成交已實現損益減手續費計算；另列出未實現損益供對照</div>
+      </div>
+      <div class="card" id="pnl-card"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>持倉</h2>
+        <div class="sub" id="pos-count"></div>
+      </div>
+      <div class="card" id="positions-card"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>掛單／停損停利</h2>
+        <div class="sub">含觸發單、只減倉與倉位停損停利</div>
+      </div>
+      <div class="card" id="orders-card"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>成交紀錄</h2>
+        <div class="sub">最近 50 筆，時間為台北時間</div>
+      </div>
+      <div class="card" id="fills-card"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>資金費</h2>
+        <div class="sub">近 7 日</div>
+      </div>
+      <div class="card" id="funding-card"></div>
+    </section>
+
+    <footer>
+      資料來源：Hyperliquid 主網公開 info API（<span style="font-family:var(--mono)">POST https://api.hyperliquid.xyz/info</span>）。本頁不含金鑰，也不會向交易所送出任何交易指令。帳戶為統一帳戶（unifiedAccount），現貨 USDC 是抵押品；永續帳戶權益與現貨餘額分開顯示，不會重複加總。交易台本金以 min(帳戶權益, 20 USD) 計算。
+    </footer>
+  </div>
+
+  <script>
+/* PARSE_START */
+const ADDR = "0xc70E03319051E7C4CE2556c064022090869012e4";
+const API = "https://api.hyperliquid.xyz/info";
+const DESK_CAP = 20;
+const DAILY_STOP_PCT = 0.02;
+const DAILY_STOP = -(DESK_CAP * DAILY_STOP_PCT);
+const POLL_MS = 15000;
+const TZ = "Asia/Taipei";
+
+function num(v) {
+  if (v == null || v === "") return NaN;
+  const n = Number(String(v).trim());
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function n0(v) {
+  const n = num(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function taipeiMidnightMs(nowMs) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date(nowMs));
+  return Date.parse(parts + "T00:00:00+08:00");
+}
+
+function formatTaipei(ms) {
+  if (!Number.isFinite(ms)) return "—";
+  const s = new Intl.DateTimeFormat("zh-TW", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(new Date(ms));
+  return s + " 台北時間";
+}
+
+function fmtMoney(v, digits) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "—";
+  const d = digits == null ? 2 : digits;
+  const sign = n < 0 ? "−" : "";
+  return sign + "$" + Math.abs(n).toLocaleString("en-US", {
+    minimumFractionDigits: d,
+    maximumFractionDigits: d
+  });
+}
+
+function fmtNum(v, maxDigits) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "—";
+  const max = maxDigits == null ? 8 : maxDigits;
+  return n.toLocaleString("en-US", { maximumFractionDigits: max });
+}
+
+function fmtPx(v) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  let d = 2;
+  if (abs >= 1000) d = 1;
+  else if (abs >= 100) d = 2;
+  else if (abs >= 1) d = 4;
+  else d = 6;
+  return n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: d });
+}
+
+function fmtRate(v) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "—";
+  return (n * 100).toLocaleString("en-US", { maximumFractionDigits: 6 }) + "%";
+}
+
+function clsPnL(v) {
+  const n = num(v);
+  if (!Number.isFinite(n) || n === 0) return "";
+  return n > 0 ? "pos" : "neg";
+}
+
+function signedSizeSide(szi) {
+  const n = n0(szi);
+  if (n > 0) return { side: "多", cls: "side-long", size: n };
+  if (n < 0) return { side: "空", cls: "side-short", size: Math.abs(n) };
+  return { side: "—", cls: "", size: 0 };
+}
+
+function orderSideLabel(side) {
+  if (side === "B") return { text: "買", cls: "side-long" };
+  if (side === "A") return { text: "賣", cls: "side-short" };
+  return { text: side || "—", cls: "" };
+}
+
+function orderKind(o) {
+  const raw = String(o.orderType || "").trim();
+  const tpslField = String(o.tpsl || "").toLowerCase();
+  const lower = raw.toLowerCase();
+  let kind = raw || "—";
+  if (raw === "Limit") kind = "限價";
+  else if (raw === "Market") kind = "市價";
+  else if (lower.includes("take profit") || tpslField === "tp") {
+    kind = lower.includes("market") ? "停利市價" : (lower.includes("limit") ? "停利限價" : "停利");
+  } else if (lower.includes("stop") || tpslField === "sl") {
+    kind = lower.includes("market") ? "停損市價" : (lower.includes("limit") ? "停損限價" : "停損");
+  }
+  return kind;
+}
+
+function flattenOrders(orders) {
+  const out = [];
+  (Array.isArray(orders) ? orders : []).forEach(function (o) {
+    if (!o || typeof o !== "object") return;
+    out.push(o);
+    if (Array.isArray(o.children)) {
+      o.children.forEach(function (c) {
+        if (c && typeof c === "object") out.push(c);
+      });
+    }
+  });
+  return out;
+}
+
+function fillDirLabel(dir) {
+  const map = {
+    "Open Long": "開多",
+    "Open Short": "開空",
+    "Close Long": "平多",
+    "Close Short": "平空",
+    "Long > Short": "多翻空",
+    "Short > Long": "空翻多",
+    "Buy": "買入",
+    "Sell": "賣出"
+  };
+  return map[dir] || dir || "—";
+}
+
+function spotUsdcFromState(spot) {
+  const balances = (spot && Array.isArray(spot.balances)) ? spot.balances : [];
+  const usdc = balances.find(function (b) { return String(b.coin).toUpperCase() === "USDC"; }) || null;
+  const total = usdc ? n0(usdc.total) : 0;
+  const hold = usdc ? n0(usdc.hold) : 0;
+  let available = total - hold;
+  const availMap = spot && Array.isArray(spot.tokenToAvailableAfterMaintenance)
+    ? spot.tokenToAvailableAfterMaintenance
+    : [];
+  let afterMaint = null;
+  availMap.forEach(function (pair) {
+    if (Array.isArray(pair) && Number(pair[0]) === 0) afterMaint = num(pair[1]);
+  });
+  return { total: total, hold: hold, available: available, afterMaint: afterMaint, other: balances.filter(function (b) { return String(b.coin).toUpperCase() !== "USDC" && n0(b.total) !== 0; }) };
+}
+
+function positionsFromState(ch) {
+  const rows = (ch && Array.isArray(ch.assetPositions)) ? ch.assetPositions : [];
+  return rows.map(function (row) {
+    const p = (row && row.position) ? row.position : (row || {});
+    const szi = n0(p.szi);
+    const side = signedSizeSide(szi);
+    const entry = num(p.entryPx);
+    const upnl = n0(p.unrealizedPnl);
+    const posVal = num(p.positionValue);
+    let mark = NaN;
+    if (Number.isFinite(posVal) && Math.abs(szi) > 0) mark = posVal / Math.abs(szi);
+    else if (Number.isFinite(entry) && Math.abs(szi) > 0) mark = entry + upnl / szi;
+    const lev = p.leverage || {};
+    return {
+      coin: p.coin || "—",
+      side: side.side,
+      sideCls: side.cls,
+      size: side.size,
+      szi: szi,
+      entry: entry,
+      mark: mark,
+      upnl: upnl,
+      roe: num(p.returnOnEquity),
+      leverageType: lev.type || "",
+      leverage: num(lev.value),
+      liq: p.liquidationPx == null ? NaN : num(p.liquidationPx),
+      marginUsed: n0(p.marginUsed),
+      positionValue: posVal
+    };
+  }).filter(function (p) { return p.size > 0; });
+}
+
+function feeToUsd(fill) {
+  const fee = n0(fill.fee);
+  const token = String(fill.feeToken || "USDC").trim().toUpperCase();
+  if (token === "USDC") return fee;
+  return 0;
+}
+
+function realizedFromFills(fills, sinceMs) {
+  let realized = 0;
+  let fees = 0;
+  let count = 0;
+  let skippedNonUsdcFee = 0;
+  (Array.isArray(fills) ? fills : []).forEach(function (f) {
+    if (!f || n0(f.time) < sinceMs) return;
+    count += 1;
+    realized += n0(f.closedPnl);
+    const token = String(f.feeToken || "USDC").trim().toUpperCase();
+    if (token === "USDC") fees += n0(f.fee);
+    else if (n0(f.fee) !== 0) skippedNonUsdcFee += 1;
+  });
+  return { realized: realized, fees: fees, net: realized - fees, count: count, skippedNonUsdcFee: skippedNonUsdcFee };
+}
+
+function parseAccount(data, nowMs) {
+  const mode = typeof data.userAbstraction === "string" ? data.userAbstraction : "";
+  const ch = data.clearinghouseState || {};
+  const spot = data.spotClearinghouseState || {};
+  const usdc = spotUsdcFromState(spot);
+  const positions = positionsFromState(ch);
+  const upnl = positions.reduce(function (s, p) { return s + p.upnl; }, 0);
+  const margin = ch.marginSummary || {};
+  const perpValue = n0(margin.accountValue);
+  const marginUsed = n0(margin.totalMarginUsed);
+  const withdrawable = n0(ch.withdrawable);
+  const unified = mode === "unifiedAccount" || mode === "portfolioMargin";
+  const equity = unified ? (usdc.total + upnl) : (perpValue + usdc.total);
+  const bankroll = Math.min(equity, DESK_CAP);
+  const orders = flattenOrders(data.frontendOpenOrders);
+  const fills = Array.isArray(data.userFills) ? data.userFills.slice() : [];
+  fills.sort(function (a, b) { return n0(b.time) - n0(a.time); });
+  const since = taipeiMidnightMs(nowMs);
+  const dayFillsSrc = Array.isArray(data.userFillsByTime) ? data.userFillsByTime : fills;
+  const day = realizedFromFills(dayFillsSrc, since);
+  const funding = Array.isArray(data.userFunding) ? data.userFunding.slice() : [];
+  funding.sort(function (a, b) { return n0(b.time) - n0(a.time); });
+  const fundingSum = funding.reduce(function (s, row) {
+    return s + n0(row && row.delta ? row.delta.usdc : 0);
+  }, 0);
+  return {
+    mode: mode,
+    unified: unified,
+    usdc: usdc,
+    perpValue: perpValue,
+    marginUsed: marginUsed,
+    withdrawable: withdrawable,
+    upnl: upnl,
+    equity: equity,
+    bankroll: bankroll,
+    positions: positions,
+    orders: orders,
+    fills: fills.slice(0, 50),
+    fillsTotal: fills.length,
+    day: day,
+    funding: funding,
+    fundingSum: fundingSum,
+    since: since
+  };
+}
+/* PARSE_END */
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+  });
+}
+
+function shortAddr(a) {
+  return a.slice(0, 6) + "…" + a.slice(-4);
+}
+
+function levLabel(p) {
+  if (!Number.isFinite(p.leverage)) return "—";
+  const typ = p.leverageType === "isolated" ? "逐倉" : (p.leverageType === "cross" ? "全倉" : "");
+  return p.leverage + "×" + (typ ? " " + typ : "");
+}
+
+const $ = function (id) { return document.getElementById(id); };
+
+function setStatus(kind, text) {
+  const dot = $("dot");
+  dot.className = "dot" + (kind ? " " + kind : "");
+  $("status").textContent = text;
+}
+
+function renderOverview(s) {
+  const modeMap = {
+    unifiedAccount: "統一帳戶（unifiedAccount）",
+    portfolioMargin: "投資組合保證金",
+    default: "標準帳戶",
+    disabled: "已關閉帳戶抽象",
+    dexAbstraction: "DEX 抽象（舊制）"
+  };
+  $("mode-label").textContent = "帳戶模式：" + (modeMap[s.mode] || s.mode || "未知");
+  const after = Number.isFinite(s.usdc.afterMaint) ? s.usdc.afterMaint : s.usdc.available;
+  const cards = [
+    { label: "現貨 USDC", value: fmtMoney(s.usdc.total), hint: s.usdc.hold ? ("掛單凍結 " + fmtMoney(s.usdc.hold)) : "抵押品所在處", extra: "" },
+    { label: "永續帳戶權益", value: fmtMoney(s.perpValue), hint: s.unified ? "統一帳戶下此欄通常不是本金，請看下方帳戶權益" : "永續保證金帳戶價值（含未實現損益）", extra: "" },
+    { label: "已用保證金", value: fmtMoney(s.marginUsed), hint: "目前持倉占用的保證金", extra: "" },
+    { label: "可出金／可用", value: fmtMoney(after), hint: "現貨維持保證金後可用 " + fmtMoney(after) + "；永續可出金 " + fmtMoney(s.withdrawable), extra: "" },
+    { label: "帳戶權益（不重複加總）", value: fmtMoney(s.equity), hint: s.unified ? "統一帳戶：現貨 USDC＋未實現損益，不與永續帳戶權益相加" : "現貨 USDC＋永續帳戶權益", extra: s.upnl ? ("未實現損益 " + fmtMoney(s.upnl)) : "" },
+    { label: "交易台本金", value: fmtMoney(s.bankroll), hint: "min(帳戶權益, $20)，交易台只按這筆計算風險", extra: s.equity > DESK_CAP ? ("帳戶權益 " + fmtMoney(s.equity) + "，超出部分不納入交易台") : "" }
+  ];
+  $("overview").innerHTML = cards.map(function (c) {
+    return '<div class="card"><div class="label">' + esc(c.label) + '</div><div class="value">' + esc(c.value) + '</div><div class="hint">' + esc(c.hint) + (c.extra ? "<br>" + esc(c.extra) : "") + "</div></div>";
+  }).join("");
+}
+
+function renderPnl(s) {
+  const net = s.day.net;
+  const stop = DAILY_STOP;
+  const toward = stop < 0 ? Math.min(1, Math.max(0, net / stop)) : 0;
+  const remain = stop - Math.min(net, 0);
+  let fillCls = "bar-fill";
+  let status = "距離每日停損還有 " + fmtMoney(Math.max(0, -stop - Math.max(0, -net)));
+  if (net <= stop) {
+    fillCls += " stop";
+    status = "已達每日停損（-" + (DAILY_STOP_PCT * 100) + "% ／ " + fmtMoney(stop) + "），交易台不應再開新倉，直到你書面重置。";
+  } else if (toward >= 0.6) {
+    fillCls += " warn";
+  }
+  if (net > 0) status = "今日已實現為正；每日停損線在 " + fmtMoney(stop) + "。";
+  if (s.day.count === 0 && s.upnl === 0) status = "今日尚無成交。停損線為 " + fmtMoney(stop) + "（$20 的 2%）。";
+
+  $("pnl-card").innerHTML =
+    '<div class="pnl-hero">' +
+      '<div><div class="label" >今日已實現損益</div><div class="value ' + clsPnL(net) + '">' + esc(fmtMoney(net)) + '</div>' +
+        '<div class="hint">已實現 ' + esc(fmtMoney(s.day.realized)) + ' − 手續費 ' + esc(fmtMoney(s.day.fees)) + '，共 ' + s.day.count + ' 筆今日成交' +
+        (s.day.skippedNonUsdcFee ? "；有非 USDC 手續費未計入" : "") + "</div></div>" +
+      '<div><div class="label">未實現損益</div><div class="value sm ' + clsPnL(s.upnl) + '">' + esc(fmtMoney(s.upnl)) + '</div>' +
+        '<div class="hint">合計參考 ' + '<span class="' + clsPnL(net + s.upnl) + '">' + esc(fmtMoney(net + s.upnl)) + "</span>；進度條依已實現損益對每日停損計算</div></div>" +
+    "</div>" +
+    '<div class="bar-wrap"><div class="bar-track"><div class="' + fillCls + '" style="width:' + (toward * 100).toFixed(1) + '%"></div></div>' +
+    '<div class="bar-meta"><span>' + esc(status) + "</span><span>每日停損 " + esc(fmtMoney(stop)) + "</span></div></div>";
+}
+
+function renderPositions(s) {
+  $("pos-count").textContent = s.positions.length ? (s.positions.length + " / 4 倉") : "";
+  if (!s.positions.length) {
+    $("positions-card").innerHTML = '<div class="empty">目前沒有持倉</div>';
+    return;
+  }
+  const rows = s.positions.map(function (p) {
+    return "<tr>" +
+      "<td>" + esc(p.coin) + "</td>" +
+      '<td class="' + p.sideCls + '">' + esc(p.side) + "</td>" +
+      '<td class="num">' + esc(fmtNum(p.size)) + "</td>" +
+      '<td class="num">' + esc(fmtPx(p.entry)) + "</td>" +
+      '<td class="num">' + esc(fmtPx(p.mark)) + "</td>" +
+      '<td class="num ' + clsPnL(p.upnl) + '">' + esc(fmtMoney(p.upnl)) + "</td>" +
+      "<td>" + esc(levLabel(p)) + "</td>" +
+      '<td class="num">' + esc(Number.isFinite(p.liq) ? fmtPx(p.liq) : "—") + "</td>" +
+      "</tr>";
+  }).join("");
+  $("positions-card").innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+    "<th>幣種</th><th>方向</th><th class='num'>數量</th><th class='num'>進場價</th><th class='num'>標記價</th><th class='num'>未實現損益</th><th>槓桿</th><th class='num'>清算價</th>" +
+    "</tr></thead><tbody>" + rows + "</tbody></table></div>";
+}
+
+function renderOrders(s) {
+  if (!s.orders.length) {
+    $("orders-card").innerHTML = '<div class="empty">目前沒有掛單</div>';
+    return;
+  }
+  const rows = s.orders.map(function (o) {
+    const side = orderSideLabel(o.side);
+    const kind = orderKind(o);
+    const trig = o.isTrigger ? (fmtPx(o.triggerPx) + (o.triggerCondition && o.triggerCondition !== "N/A" ? "（" + o.triggerCondition + "）" : "")) : "—";
+    const flags = [];
+    if (o.reduceOnly) flags.push("只減倉");
+    if (o.isPositionTpsl) flags.push("整倉停損停利");
+    if (o.isTrigger) flags.push("觸發單");
+    const sz = (o.isPositionTpsl && n0(o.sz) === 0) ? "整倉" : fmtNum(o.sz);
+    return "<tr>" +
+      "<td>" + esc(o.coin || "—") + "</td>" +
+      '<td class="' + side.cls + '">' + esc(side.text) + "</td>" +
+      "<td>" + esc(kind) + "</td>" +
+      '<td class="num">' + esc(sz) + "</td>" +
+      '<td class="num">' + esc(fmtPx(o.limitPx)) + "</td>" +
+      "<td>" + esc(trig) + "</td>" +
+      "<td>" + esc(flags.join("、") || "—") + "</td>" +
+      "<td>" + esc(formatTaipei(n0(o.timestamp))) + "</td>" +
+      "</tr>";
+  }).join("");
+  $("orders-card").innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+    "<th>幣種</th><th>方向</th><th>類型</th><th class='num'>數量</th><th class='num'>限價</th><th>觸發價</th><th>標記</th><th>時間</th>" +
+    "</tr></thead><tbody>" + rows + "</tbody></table></div>";
+}
+
+function renderFills(s) {
+  if (!s.fills.length) {
+    $("fills-card").innerHTML = '<div class="empty">目前沒有成交紀錄</div>';
+    return;
+  }
+  const rows = s.fills.map(function (f) {
+    const side = orderSideLabel(f.side);
+    const fee = n0(f.fee);
+    const feeTok = String(f.feeToken || "USDC").trim();
+    return "<tr>" +
+      "<td>" + esc(formatTaipei(n0(f.time))) + "</td>" +
+      "<td>" + esc(f.coin || "—") + "</td>" +
+      '<td class="' + side.cls + '">' + esc(side.text) + "</td>" +
+      "<td>" + esc(fillDirLabel(f.dir)) + "</td>" +
+      '<td class="num">' + esc(fmtPx(f.px)) + "</td>" +
+      '<td class="num">' + esc(fmtNum(f.sz)) + "</td>" +
+      '<td class="num ' + clsPnL(f.closedPnl) + '">' + esc(fmtMoney(f.closedPnl)) + "</td>" +
+      '<td class="num">' + esc(fmtMoney(fee)) + (feeTok && feeTok.toUpperCase() !== "USDC" ? " " + esc(feeTok) : "") + "</td>" +
+      "<td>" + esc(f.crossed ? "吃單" : "掛單") + "</td>" +
+      "</tr>";
+  }).join("");
+  $("fills-card").innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+    "<th>時間</th><th>幣種</th><th>方向</th><th>動作</th><th class='num'>價格</th><th class='num'>數量</th><th class='num'>已實現損益</th><th class='num'>手續費</th><th>類型</th>" +
+    "</tr></thead><tbody>" + rows + "</tbody></table></div>";
+}
+
+function renderFunding(s) {
+  if (!s.funding.length) {
+    $("funding-card").innerHTML = '<div class="empty">近七日沒有資金費</div>';
+    return;
+  }
+  const rows = s.funding.map(function (row) {
+    const d = row.delta || {};
+    return "<tr>" +
+      "<td>" + esc(formatTaipei(n0(row.time))) + "</td>" +
+      "<td>" + esc(d.coin || "—") + "</td>" +
+      '<td class="num">' + esc(fmtNum(d.szi)) + "</td>" +
+      '<td class="num">' + esc(fmtRate(d.fundingRate)) + "</td>" +
+      '<td class="num ' + clsPnL(d.usdc) + '">' + esc(fmtMoney(d.usdc, 4)) + "</td>" +
+      "</tr>";
+  }).join("");
+  $("funding-card").innerHTML =
+    '<div class="hint" style="margin:0 2px 10px">近七日合計 <span class="' + clsPnL(s.fundingSum) + '">' + esc(fmtMoney(s.fundingSum, 4)) + "</span></div>" +
+    '<div class="table-wrap"><table><thead><tr>' +
+    "<th>時間</th><th>幣種</th><th class='num'>倉位大小</th><th class='num'>費率</th><th class='num'>USDC</th>" +
+    "</tr></thead><tbody>" + rows + "</tbody></table></div>";
+}
+
+function renderAll(s) {
+  renderOverview(s);
+  renderPnl(s);
+  renderPositions(s);
+  renderOrders(s);
+  renderFills(s);
+  renderFunding(s);
+}
+
+async function hl(body) {
+  const res = await fetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status + "（" + body.type + "）");
+  return res.json();
+}
+
+let inFlight = false;
+let lastOk = 0;
+let timer = null;
+let tickTimer = null;
+
+async function refresh(manual) {
+  if (inFlight) return;
+  inFlight = true;
+  if (manual) $("refresh-btn").disabled = true;
+  setStatus("busy", "更新中…");
+  const now = Date.now();
+  const startDay = taipeiMidnightMs(now);
+  const startFunding = now - 7 * 24 * 60 * 60 * 1000;
+  try {
+    const results = await Promise.all([
+      hl({ type: "userAbstraction", user: ADDR }),
+      hl({ type: "clearinghouseState", user: ADDR }),
+      hl({ type: "spotClearinghouseState", user: ADDR }),
+      hl({ type: "frontendOpenOrders", user: ADDR }),
+      hl({ type: "userFills", user: ADDR }),
+      hl({ type: "userFillsByTime", user: ADDR, startTime: startDay }),
+      hl({ type: "userFunding", user: ADDR, startTime: startFunding })
+    ]);
+    const snapshot = {
+      userAbstraction: results[0],
+      clearinghouseState: results[1],
+      spotClearinghouseState: results[2],
+      frontendOpenOrders: results[3],
+      userFills: results[4],
+      userFillsByTime: results[5],
+      userFunding: results[6]
+    };
+    const state = parseAccount(snapshot, now);
+    renderAll(state);
+    lastOk = Date.now();
+    $("updated").textContent = "最後更新：" + formatTaipei(lastOk);
+    $("banner").classList.remove("show");
+    $("banner").textContent = "";
+    setStatus("ok", "已連線");
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    $("banner").textContent = "無法更新資料：" + msg + (lastOk ? "。仍顯示上一次成功的結果。" : "。請確認網路連線，或改用本機網頁伺服器開啟此檔。");
+    $("banner").classList.add("show");
+    setStatus("err", "連線失敗");
+  } finally {
+    inFlight = false;
+    $("refresh-btn").disabled = false;
+  }
+}
+
+function startCountdown() {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = setInterval(function () {
+    if (!lastOk) {
+      $("countdown").textContent = "每 15 秒自動更新";
+      return;
+    }
+    const remain = Math.max(0, Math.ceil((POLL_MS - (Date.now() - lastOk)) / 1000));
+    $("countdown").textContent = remain > 0 ? (remain + " 秒後自動更新") : "即將更新…";
+  }, 250);
+}
+
+function loop() {
+  if (document.visibilityState === "hidden") return;
+  refresh(false);
+}
+
+function boot() {
+  $("addr-short").textContent = shortAddr(ADDR);
+  $("explorer").href = "https://app.hyperliquid.xyz/explorer/address/" + ADDR;
+  $("copy-btn").addEventListener("click", function () {
+    const done = function () { $("copy-btn").textContent = "已複製"; setTimeout(function () { $("copy-btn").textContent = "複製地址"; }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(ADDR).then(done).catch(function () {
+        window.prompt("複製這個地址", ADDR);
+      });
+    } else {
+      window.prompt("複製這個地址", ADDR);
+    }
+  });
+  $("refresh-btn").addEventListener("click", function () { refresh(true); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") refresh(false);
+  });
+  refresh(false);
+  timer = setInterval(loop, POLL_MS);
+  startCountdown();
+}
+
+boot();
+  </script>
+</body>
+</html>
