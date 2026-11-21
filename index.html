@@ -210,6 +210,7 @@
     }
     .chart-chip:hover { border-color: var(--gold); color: var(--text); }
     .chart-chip.is-on { color: var(--text); border-color: var(--gold); background: var(--gold-dim); }
+    .chart-chip:disabled { opacity: 0.5; cursor: default; }
     .chart-quote {
       display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
       gap: 8px 18px; margin-bottom: 8px;
@@ -284,6 +285,10 @@
         <div class="chart-tools">
           <div class="chart-row" id="chart-coins"></div>
           <div class="chart-row" id="chart-ivs"></div>
+          <div class="chart-row" id="chart-nav">
+            <button type="button" class="chart-chip" id="chart-to-start">跳到最早</button>
+            <button type="button" class="chart-chip" id="chart-to-now">回到最新</button>
+          </div>
         </div>
         <div class="chart-quote">
           <div>
@@ -1292,6 +1297,7 @@ const CHART_IVS = [
   { id: "1d", ms: 24 * 60 * 60 * 1000 }
 ];
 const CHART_BARS = 300;
+const CHART_PAGE = 500;
 let chartCoin = "BTC";
 let chartIv = CHART_IVS[2];
 let chartPx = NaN;
@@ -1310,6 +1316,9 @@ let chartLoadGen = 0;
 let chartStreamReady = false;
 let chartTicks = 0;
 let chartRetry = null;
+let chartBars = [];
+let chartHistoryDone = false;
+let chartHistoryTask = null;
 
 function setChartLive(kind, text) {
   const dot = $("chart-dot");
@@ -1482,25 +1491,47 @@ function chartSyncPosition(s) {
   } catch (err) { /* the price line must not break the rest of the page */ }
 }
 
-function applyChartBars(bars) {
-  candleSeries.setData(bars.map(function (b) { return b.candle; }));
-  volumeSeries.setData(bars.map(function (b) { return b.volume; }));
-  if (bars.length) {
-    const last = bars[bars.length - 1].candle.close;
+function markChartMeta() {
+  const canvas = $("chart-canvas");
+  if (!canvas) return;
+  canvas.setAttribute("data-bars", String(chartBars.length));
+  canvas.setAttribute("data-done", chartHistoryDone ? "1" : "0");
+  if (chartBars.length) canvas.setAttribute("data-oldest", String(chartBars[0].candle.time));
+}
+
+function renderChartBars(added) {
+  const keep = added > 0;
+  const range = keep && chartObj ? chartObj.timeScale().getVisibleLogicalRange() : null;
+  candleSeries.setData(chartBars.map(function (b) { return b.candle; }));
+  volumeSeries.setData(chartBars.map(function (b) { return b.volume; }));
+  if (chartBars.length) {
+    const last = chartBars[chartBars.length - 1].candle.close;
     candleSeries.applyOptions({ priceFormat: Object.assign({ type: "price" }, chartPrecision(last)) });
     chartPx = last;
     paintChartQuote();
   }
-  chartObj.timeScale().fitContent();
+  if (keep && range) {
+    chartObj.timeScale().setVisibleLogicalRange({
+      from: range.from + added,
+      to: range.to + added
+    });
+  } else if (chartObj) {
+    chartObj.timeScale().fitContent();
+  }
   drawEntryLine(true);
+  markChartMeta();
 }
 
 function applyLiveCandle(c) {
   if (!chartStreamReady || !candleSeries || !c) return;
   if (c.s !== chartCoin || c.i !== chartIv.id) return;
   const bars = barsFromCandles([c]);
-  if (!bars.length) return;
+  if (!bars.length || !chartBars.length) return;
   const bar = bars[0];
+  const last = chartBars[chartBars.length - 1];
+  if (bar.candle.time < last.candle.time) return;
+  if (bar.candle.time === last.candle.time) chartBars[chartBars.length - 1] = bar;
+  else chartBars.push(bar);
   try {
     candleSeries.update(bar.candle);
     volumeSeries.update(bar.volume);
@@ -1512,6 +1543,98 @@ function applyLiveCandle(c) {
   chartTicks += 1;
   const dot = $("chart-dot");
   if (dot) dot.setAttribute("data-ticks", String(chartTicks));
+  markChartMeta();
+}
+
+function resetChartHistory() {
+  chartBars = [];
+  chartHistoryDone = false;
+  chartStreamReady = false;
+  markChartMeta();
+}
+
+async function loadOlderOnce() {
+  const gen = chartLoadGen;
+  const coin = chartCoin;
+  const iv = chartIv;
+  if (!chartBars.length || !candleSeries) return 0;
+  const oldest = chartBars[0].candle.time;
+  const endTime = oldest * 1000 - 1;
+  const startTime = endTime - iv.ms * CHART_PAGE;
+  let rows = null;
+  try {
+    rows = await postInfo({
+      type: "candleSnapshot",
+      req: { coin: coin, interval: iv.id, startTime: startTime, endTime: endTime }
+    });
+  } catch (err) {
+    return 0;
+  }
+  if (gen !== chartLoadGen || coin !== chartCoin || iv.id !== chartIv.id) return 0;
+  if (!Array.isArray(rows)) return 0;
+  const older = barsFromCandles(rows).filter(function (b) { return b.candle.time < oldest; });
+  if (!older.length) {
+    chartHistoryDone = true;
+    const note = $("chart-note");
+    if (note) note.textContent = "已到最早資料";
+    markChartMeta();
+    return 0;
+  }
+  chartBars = older.concat(chartBars);
+  renderChartBars(older.length);
+  setTimeout(function () {
+    if (gen !== chartLoadGen || chartHistoryDone || !chartObj) return;
+    const range = chartObj.timeScale().getVisibleLogicalRange();
+    if (range && range.from < 50) loadOlder();
+  }, 0);
+  return older.length;
+}
+
+function loadOlder() {
+  if (chartHistoryDone || !chartBars.length || !candleSeries) return Promise.resolve(0);
+  if (chartHistoryTask) return chartHistoryTask;
+  const task = loadOlderOnce();
+  chartHistoryTask = task;
+  return task.finally(function () {
+    if (chartHistoryTask === task) chartHistoryTask = null;
+  });
+}
+
+async function jumpEarliest() {
+  if (!chartObj) return;
+  const btn = $("chart-to-start");
+  if (btn) btn.disabled = true;
+  const gen = chartLoadGen;
+  try {
+    let guard = 0;
+    while (gen === chartLoadGen && !chartHistoryDone && guard < 40) {
+      const before = chartBars.length;
+      await loadOlder();
+      guard += 1;
+      if (gen !== chartLoadGen) return;
+      if (chartBars.length === before) break;
+    }
+    if (gen !== chartLoadGen || !chartObj || !chartBars.length) return;
+    const range = chartObj.timeScale().getVisibleLogicalRange();
+    const span = range && range.to > range.from ? range.to - range.from : 120;
+    chartObj.timeScale().setVisibleLogicalRange({ from: 0, to: span });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function jumpLatest() {
+  if (!chartObj) return;
+  if (typeof chartObj.timeScale().scrollToRealTime === "function") {
+    chartObj.timeScale().scrollToRealTime();
+    return;
+  }
+  const range = chartObj.timeScale().getVisibleLogicalRange();
+  const span = range && range.to > range.from ? range.to - range.from : 120;
+  chartObj.timeScale().setVisibleLogicalRange({
+    from: Math.max(0, chartBars.length - span),
+    to: chartBars.length + 2
+  });
 }
 
 function sendChartSub() {
@@ -1574,7 +1697,7 @@ async function loadChartHistory() {
   const coin = chartCoin;
   const iv = chartIv;
   if (chartRetry) { clearTimeout(chartRetry); chartRetry = null; }
-  chartStreamReady = false;
+  resetChartHistory();
   sendChartSub();
   const note = $("chart-note");
   if (note) note.textContent = "";
@@ -1603,7 +1726,9 @@ async function loadChartHistory() {
   }
   const prev = prevFromMeta(meta, coin);
   if (Number.isFinite(prev)) chartPrev = prev;
-  applyChartBars(barsFromCandles(candles));
+  chartBars = barsFromCandles(candles);
+  chartHistoryDone = false;
+  renderChartBars(0);
   chartStreamReady = true;
   sendChartSub();
 }
@@ -1705,6 +1830,19 @@ function bootChart() {
   });
   chartObj.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.28 } });
   volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+  chartObj.timeScale().subscribeVisibleLogicalRangeChange(function (range) {
+    const host = $("chart-canvas");
+    if (host && range) {
+      host.setAttribute("data-from", String(Math.round(range.from)));
+      host.setAttribute("data-to", String(Math.round(range.to)));
+    }
+    if (!range || chartHistoryDone || !chartBars.length) return;
+    if (range.from < 50) loadOlder();
+  });
+  const toStart = $("chart-to-start");
+  const toNow = $("chart-to-now");
+  if (toStart) toStart.addEventListener("click", function () { jumpEarliest(); });
+  if (toNow) toNow.addEventListener("click", function () { jumpLatest(); });
   openChartSocket();
   setInterval(function () {
     if (chartWs && chartWs.readyState === WebSocket.OPEN) {
