@@ -205,9 +205,9 @@
         <div class="limits">
           <span class="chip">每筆風險 <b>0.5%</b></span>
           <span class="chip">總風險 <b>4%</b></span>
-          <span class="chip">最高槓桿 <b>3 倍</b></span>
-          <span class="chip">最多同時持倉 <b>4 倉</b></span>
-          <span class="chip">只做 <b>BTC / ETH / SOL / HYPE</b> 永續</span>
+          <span class="chip">最高槓桿 <b>10 倍</b>（不超過各幣上限，XMR 5 倍）</span>
+          <span class="chip">最多同時持倉 <b>8 倉</b></span>
+          <span class="chip">只做 <b>BTC / ETH / HYPE / ZEC / SOL / XRP / NEAR / XMR</b> 永續</span>
           <span class="chip">每日停損 <b>-2%</b>（以 $20 計為 -$0.40）</span>
           <span class="chip">滑價 <b>10 bps</b></span>
         </div>
@@ -597,7 +597,7 @@ function renderPnl(s) {
 }
 
 function renderPositions(s) {
-  $("pos-count").textContent = s.positions.length ? (s.positions.length + " / 4 倉") : "";
+  $("pos-count").textContent = s.positions.length ? (s.positions.length + " / 8 倉") : "";
   if (!s.positions.length) {
     $("positions-card").innerHTML = '<div class="empty">目前沒有持倉</div>';
     return;
