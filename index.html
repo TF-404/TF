@@ -201,6 +201,30 @@
     .cal-recent .when { color: var(--muted); }
     .cal-recent .amt { font-weight: 600; }
 
+    .chart-tools { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+    .chart-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chart-chip {
+      appearance: none; border: 1px solid var(--line); background: var(--bg-elev-2);
+      color: var(--muted); border-radius: 999px; padding: 4px 10px; font: inherit;
+      font-size: 12px; cursor: pointer; line-height: 1.4;
+    }
+    .chart-chip:hover { border-color: var(--gold); color: var(--text); }
+    .chart-chip.is-on { color: var(--text); border-color: var(--gold); background: var(--gold-dim); }
+    .chart-quote {
+      display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+      gap: 8px 18px; margin-bottom: 8px;
+    }
+    .chart-px {
+      font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums;
+      letter-spacing: 0.01em; line-height: 1.2;
+    }
+    .chart-chg { margin-top: 2px; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .chart-live {
+      display: inline-flex; align-items: center; gap: 8px;
+      color: var(--muted); font-size: 12px; margin-left: auto;
+    }
+    .chart-canvas { width: 100%; height: 420px; }
+
     @media (max-width: 800px) {
       .cards { grid-template-columns: 1fr 1fr; }
       .card.span-2 { grid-column: span 2; }
@@ -218,6 +242,8 @@
       .block-head h2 { flex: 0 0 auto; white-space: nowrap; }
       .block-head .sub { min-width: 0; }
       .bar-meta { flex-direction: column; align-items: stretch; gap: 4px; }
+      .chart-px { font-size: 22px; }
+      .chart-canvas { height: 300px; }
     }
   </style>
 </head>
@@ -248,6 +274,33 @@
     </header>
 
     <div class="banner" id="banner"></div>
+
+    <section class="block" id="chart-block">
+      <div class="block-head">
+        <h2>漲跌圖</h2>
+        <div class="sub">永續合約，時間為台北時間</div>
+      </div>
+      <div class="card chart-card">
+        <div class="chart-tools">
+          <div class="chart-row" id="chart-coins"></div>
+          <div class="chart-row" id="chart-ivs"></div>
+        </div>
+        <div class="chart-quote">
+          <div>
+            <div class="label">現價</div>
+            <div class="chart-px" id="chart-px">—</div>
+            <div class="chart-chg" id="chart-chg">—</div>
+          </div>
+          <div class="chart-live">
+            <span class="dot" id="chart-dot" data-ticks="0"></span>
+            <span id="chart-live-label">連線中</span>
+          </div>
+        </div>
+        <div id="chart-canvas" class="chart-canvas"></div>
+        <div class="hint" id="chart-entry"></div>
+        <div class="hint" id="chart-note"></div>
+      </div>
+    </section>
 
     <section class="block">
       <div class="block-head">
@@ -331,6 +384,7 @@
     </footer>
   </div>
 
+  <script src="https://unpkg.com/lightweight-charts@5.3.0/dist/lightweight-charts.standalone.production.js"></script>
   <script>
 /* PARSE_START */
 const ADDR = "0xc70E03319051E7C4CE2556c064022090869012e4";
@@ -1124,6 +1178,7 @@ function renderAll(s) {
   renderOrders(s);
   renderFills(s);
   renderFunding(s);
+  chartSyncPosition(s);
 }
 
 async function hl(body) {
@@ -1224,6 +1279,440 @@ function boot() {
   refresh(false);
   timer = setInterval(loop, POLL_MS);
   startCountdown();
+  bootChart();
+}
+
+const CHART_COINS = ["BTC", "ETH", "HYPE", "ZEC", "SOL", "XRP", "NEAR", "XMR"];
+const CHART_IVS = [
+  { id: "1m", ms: 60 * 1000 },
+  { id: "5m", ms: 5 * 60 * 1000 },
+  { id: "15m", ms: 15 * 60 * 1000 },
+  { id: "1h", ms: 60 * 60 * 1000 },
+  { id: "4h", ms: 4 * 60 * 60 * 1000 },
+  { id: "1d", ms: 24 * 60 * 60 * 1000 }
+];
+const CHART_BARS = 300;
+let chartCoin = "BTC";
+let chartIv = CHART_IVS[2];
+let chartPx = NaN;
+let chartPrev = NaN;
+let chartPositions = [];
+let chartObj = null;
+let candleSeries = null;
+let volumeSeries = null;
+let entryLine = null;
+let entryKey = "";
+let chartWs = null;
+let chartSub = null;
+let chartDelay = 1000;
+let chartReconnect = null;
+let chartLoadGen = 0;
+let chartStreamReady = false;
+let chartTicks = 0;
+let chartRetry = null;
+
+function setChartLive(kind, text) {
+  const dot = $("chart-dot");
+  const label = $("chart-live-label");
+  if (dot) dot.className = "dot" + (kind ? " " + kind : "");
+  if (label) label.textContent = text;
+}
+
+function fmtChgPct(v) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : (n < 0 ? "−" : "");
+  return sign + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + "%";
+}
+
+function paintChartQuote() {
+  const pxEl = $("chart-px");
+  const chgEl = $("chart-chg");
+  if (!pxEl || !chgEl) return;
+  if (!Number.isFinite(chartPx)) {
+    pxEl.textContent = "—";
+    chgEl.textContent = "—";
+    chgEl.className = "chart-chg";
+    return;
+  }
+  pxEl.textContent = fmtPx(chartPx);
+  if (!Number.isFinite(chartPrev) || chartPrev === 0) {
+    chgEl.textContent = "24 小時 —";
+    chgEl.className = "chart-chg";
+    return;
+  }
+  const diff = chartPx - chartPrev;
+  const pct = diff / chartPrev * 100;
+  chgEl.className = "chart-chg " + (diff > 0 ? "pos" : diff < 0 ? "neg" : "");
+  chgEl.textContent = "24 小時 " + fmtSignedMoney(diff) + "（" + fmtChgPct(pct) + "）";
+}
+
+function paintChartChips() {
+  document.querySelectorAll("#chart-coins .chart-chip").forEach(function (btn) {
+    const on = btn.getAttribute("data-coin") === chartCoin;
+    btn.classList.toggle("is-on", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  document.querySelectorAll("#chart-ivs .chart-chip").forEach(function (btn) {
+    const on = btn.getAttribute("data-iv") === chartIv.id;
+    btn.classList.toggle("is-on", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+function chartPrecision(price) {
+  const abs = Math.abs(price);
+  if (abs >= 1000) return { precision: 1, minMove: 0.1 };
+  if (abs >= 100) return { precision: 2, minMove: 0.01 };
+  if (abs >= 1) return { precision: 4, minMove: 0.0001 };
+  if (abs >= 0.01) return { precision: 5, minMove: 0.00001 };
+  return { precision: 6, minMove: 0.000001 };
+}
+
+function barsFromCandles(rows) {
+  const map = {};
+  (Array.isArray(rows) ? rows : []).forEach(function (c) {
+    if (!c) return;
+    const openMs = n0(c.t);
+    const open = num(c.o);
+    const high = num(c.h);
+    const low = num(c.l);
+    const close = num(c.c);
+    if (!openMs || !Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) return;
+    const time = Math.floor(openMs / 1000);
+    const up = close >= open;
+    map[time] = {
+      candle: { time: time, open: open, high: high, low: low, close: close },
+      volume: {
+        time: time,
+        value: Math.max(0, n0(c.v)),
+        color: up ? "rgba(61,203,138,0.5)" : "rgba(240,113,103,0.5)"
+      }
+    };
+  });
+  return Object.keys(map).map(function (k) { return Number(k); }).sort(function (a, b) { return a - b; }).map(function (k) {
+    return map[k];
+  });
+}
+
+function formatChartTick(time, tickMarkType) {
+  const ms = Number(time) * 1000;
+  if (!Number.isFinite(ms)) return "";
+  const TT = (window.LightweightCharts && LightweightCharts.TickMarkType) || {};
+  const opts = { timeZone: TZ, hour12: false };
+  if (tickMarkType === TT.Year) opts.year = "numeric";
+  else if (tickMarkType === TT.Month) opts.month = "short";
+  else if (tickMarkType === TT.DayOfMonth) { opts.month = "numeric"; opts.day = "numeric"; }
+  else { opts.hour = "2-digit"; opts.minute = "2-digit"; }
+  return new Intl.DateTimeFormat("zh-TW", opts).format(new Date(ms));
+}
+
+function formatChartTime(time) {
+  const ms = Number(time) * 1000;
+  if (!Number.isFinite(ms)) return "";
+  return new Intl.DateTimeFormat("zh-TW", {
+    timeZone: TZ,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(ms));
+}
+
+function prevFromMeta(meta, coin) {
+  if (!Array.isArray(meta) || meta.length < 2) return NaN;
+  const universe = (meta[0] && Array.isArray(meta[0].universe)) ? meta[0].universe : [];
+  const ctxs = Array.isArray(meta[1]) ? meta[1] : [];
+  for (let i = 0; i < universe.length; i++) {
+    if (universe[i] && universe[i].name === coin) return num(ctxs[i] && ctxs[i].prevDayPx);
+  }
+  return NaN;
+}
+
+async function postInfo(body) {
+  let last = null;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const res = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return await res.json();
+    } catch (err) {
+      last = err;
+      await new Promise(function (resolve) { setTimeout(resolve, Math.min(4000, 400 * Math.pow(2, i))); });
+    }
+  }
+  throw last || new Error("info failed");
+}
+
+function drawEntryLine(force) {
+  if (!candleSeries) return;
+  const match = (chartPositions || []).find(function (p) { return p && p.coin === chartCoin && Number.isFinite(p.entry); }) || null;
+  const key = match ? (match.coin + "|" + match.side + "|" + match.size + "|" + match.entry) : "";
+  if (!force && key === entryKey) return;
+  if (entryLine) {
+    candleSeries.removePriceLine(entryLine);
+    entryLine = null;
+  }
+  entryKey = key;
+  const hint = $("chart-entry");
+  if (!match) {
+    if (hint) hint.textContent = "";
+    return;
+  }
+  entryLine = candleSeries.createPriceLine({
+    price: match.entry,
+    color: match.side === "多" ? "#3dcb8a" : "#f07167",
+    lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    axisLabelVisible: true,
+    title: match.side + " " + fmtNum(match.size)
+  });
+  if (hint) hint.textContent = "持倉進場 " + match.side + " " + fmtNum(match.size) + " @ " + fmtPx(match.entry);
+}
+
+function chartSyncPosition(s) {
+  try {
+    chartPositions = (s && Array.isArray(s.positions)) ? s.positions : [];
+    drawEntryLine(false);
+  } catch (err) { /* the price line must not break the rest of the page */ }
+}
+
+function applyChartBars(bars) {
+  candleSeries.setData(bars.map(function (b) { return b.candle; }));
+  volumeSeries.setData(bars.map(function (b) { return b.volume; }));
+  if (bars.length) {
+    const last = bars[bars.length - 1].candle.close;
+    candleSeries.applyOptions({ priceFormat: Object.assign({ type: "price" }, chartPrecision(last)) });
+    chartPx = last;
+    paintChartQuote();
+  }
+  chartObj.timeScale().fitContent();
+  drawEntryLine(true);
+}
+
+function applyLiveCandle(c) {
+  if (!chartStreamReady || !candleSeries || !c) return;
+  if (c.s !== chartCoin || c.i !== chartIv.id) return;
+  const bars = barsFromCandles([c]);
+  if (!bars.length) return;
+  const bar = bars[0];
+  try {
+    candleSeries.update(bar.candle);
+    volumeSeries.update(bar.volume);
+  } catch (err) {
+    return;
+  }
+  chartPx = bar.candle.close;
+  paintChartQuote();
+  chartTicks += 1;
+  const dot = $("chart-dot");
+  if (dot) dot.setAttribute("data-ticks", String(chartTicks));
+}
+
+function sendChartSub() {
+  if (!chartWs || chartWs.readyState !== WebSocket.OPEN) return;
+  const next = { type: "candle", coin: chartCoin, interval: chartIv.id };
+  if (chartSub && (chartSub.coin !== next.coin || chartSub.interval !== next.interval)) {
+    chartWs.send(JSON.stringify({ method: "unsubscribe", subscription: chartSub }));
+    chartSub = null;
+  }
+  if (!chartSub) {
+    chartSub = next;
+    chartWs.send(JSON.stringify({ method: "subscribe", subscription: chartSub }));
+  }
+}
+
+function openChartSocket() {
+  if (chartWs && (chartWs.readyState === WebSocket.OPEN || chartWs.readyState === WebSocket.CONNECTING)) return;
+  setChartLive("busy", "連線中");
+  let socket;
+  try {
+    socket = new WebSocket("wss://api.hyperliquid.xyz/ws");
+  } catch (err) {
+    scheduleChartReconnect();
+    return;
+  }
+  chartWs = socket;
+  socket.onopen = function () {
+    chartDelay = 1000;
+    chartSub = null;
+    setChartLive("ok", "即時");
+    sendChartSub();
+  };
+  socket.onmessage = function (ev) {
+    let msg = null;
+    try { msg = JSON.parse(ev.data); } catch (err) { return; }
+    if (!msg || msg.channel !== "candle") return;
+    applyLiveCandle(msg.data);
+  };
+  socket.onerror = function () {};
+  socket.onclose = function () {
+    if (chartWs === socket) chartWs = null;
+    chartSub = null;
+    setChartLive("err", "重新連線");
+    scheduleChartReconnect();
+  };
+}
+
+function scheduleChartReconnect() {
+  if (chartReconnect) return;
+  const wait = chartDelay;
+  chartDelay = Math.min(15000, chartDelay * 2);
+  chartReconnect = setTimeout(function () {
+    chartReconnect = null;
+    openChartSocket();
+  }, wait);
+}
+
+async function loadChartHistory() {
+  const gen = ++chartLoadGen;
+  const coin = chartCoin;
+  const iv = chartIv;
+  if (chartRetry) { clearTimeout(chartRetry); chartRetry = null; }
+  chartStreamReady = false;
+  sendChartSub();
+  const note = $("chart-note");
+  if (note) note.textContent = "";
+  const end = Date.now();
+  const start = end - iv.ms * CHART_BARS;
+  let candles = null;
+  let meta = null;
+  try {
+    const pair = await Promise.all([
+      postInfo({ type: "candleSnapshot", req: { coin: coin, interval: iv.id, startTime: start, endTime: end } }),
+      postInfo({ type: "metaAndAssetCtxs" }).catch(function () { return null; })
+    ]);
+    candles = pair[0];
+    meta = pair[1];
+  } catch (err) {
+    candles = null;
+  }
+  if (gen !== chartLoadGen) return;
+  if (!Array.isArray(candles)) {
+    if (note) note.textContent = "K 線暫時無法載入。";
+    chartRetry = setTimeout(function () {
+      chartRetry = null;
+      if (gen === chartLoadGen) loadChartHistory();
+    }, 15000);
+    return;
+  }
+  const prev = prevFromMeta(meta, coin);
+  if (Number.isFinite(prev)) chartPrev = prev;
+  applyChartBars(barsFromCandles(candles));
+  chartStreamReady = true;
+  sendChartSub();
+}
+
+async function refreshChartPrev() {
+  const coin = chartCoin;
+  try {
+    const meta = await postInfo({ type: "metaAndAssetCtxs" });
+    if (coin !== chartCoin) return;
+    const prev = prevFromMeta(meta, coin);
+    if (Number.isFinite(prev)) {
+      chartPrev = prev;
+      paintChartQuote();
+    }
+  } catch (err) { /* keep the last baseline */ }
+}
+
+function bootChart() {
+  const coins = $("chart-coins");
+  const ivs = $("chart-ivs");
+  const canvas = $("chart-canvas");
+  if (!coins || !ivs || !canvas) return;
+  CHART_COINS.forEach(function (coin) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chart-chip";
+    btn.textContent = coin;
+    btn.setAttribute("data-coin", coin);
+    btn.addEventListener("click", function () {
+      if (chartCoin === coin) return;
+      chartCoin = coin;
+      chartPrev = NaN;
+      paintChartChips();
+      loadChartHistory();
+    });
+    coins.appendChild(btn);
+  });
+  CHART_IVS.forEach(function (iv) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chart-chip";
+    btn.textContent = iv.id;
+    btn.setAttribute("data-iv", iv.id);
+    btn.addEventListener("click", function () {
+      if (chartIv.id === iv.id) return;
+      chartIv = iv;
+      paintChartChips();
+      loadChartHistory();
+    });
+    ivs.appendChild(btn);
+  });
+  paintChartChips();
+  if (!window.LightweightCharts || !canvas) {
+    const note = $("chart-note");
+    if (note) note.textContent = "圖表元件沒有載入。";
+    return;
+  }
+  chartObj = LightweightCharts.createChart(canvas, {
+    autoSize: true,
+    layout: {
+      background: { type: "solid", color: "#14171e" },
+      textColor: "#8b909a",
+      fontFamily: '"Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif',
+      attributionLogo: false
+    },
+    grid: {
+      vertLines: { color: "#22262f" },
+      horzLines: { color: "#22262f" }
+    },
+    rightPriceScale: { borderColor: "#2a303c" },
+    timeScale: {
+      borderColor: "#2a303c",
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 4,
+      tickMarkFormatter: formatChartTick
+    },
+    localization: { locale: "zh-TW", timeFormatter: formatChartTime },
+    crosshair: {
+      vertLine: { color: "#5c616b", labelBackgroundColor: "#1b1f28" },
+      horzLine: { color: "#5c616b", labelBackgroundColor: "#1b1f28" }
+    },
+    handleScroll: true,
+    handleScale: true
+  });
+  candleSeries = chartObj.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: "#3dcb8a",
+    downColor: "#f07167",
+    borderUpColor: "#3dcb8a",
+    borderDownColor: "#f07167",
+    wickUpColor: "#3dcb8a",
+    wickDownColor: "#f07167"
+  });
+  volumeSeries = chartObj.addSeries(LightweightCharts.HistogramSeries, {
+    priceFormat: { type: "volume" },
+    priceScaleId: "",
+    lastValueVisible: false,
+    priceLineVisible: false
+  });
+  chartObj.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.28 } });
+  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+  openChartSocket();
+  setInterval(function () {
+    if (chartWs && chartWs.readyState === WebSocket.OPEN) {
+      chartWs.send(JSON.stringify({ method: "ping" }));
+    }
+  }, 30000);
+  setInterval(refreshChartPrev, 60000);
+  loadChartHistory();
 }
 
 boot();
