@@ -285,6 +285,7 @@
         <div class="chart-tools">
           <div class="chart-row" id="chart-coins"></div>
           <div class="chart-row" id="chart-ivs"></div>
+          <div class="chart-row" id="chart-inds"></div>
           <div class="chart-row" id="chart-nav">
             <button type="button" class="chart-chip" id="chart-to-start">跳到最早</button>
             <button type="button" class="chart-chip" id="chart-to-now">回到最新</button>
@@ -1367,6 +1368,11 @@ function paintChartChips() {
     btn.classList.toggle("is-on", on);
     btn.setAttribute("aria-pressed", on ? "true" : "false");
   });
+  document.querySelectorAll("#chart-inds .chart-chip").forEach(function (btn) {
+    const on = !!indOn[btn.getAttribute("data-ind")];
+    btn.classList.toggle("is-on", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
 }
 
 function chartPrecision(price) {
@@ -1506,10 +1512,16 @@ function renderChartBars(added) {
   volumeSeries.setData(chartBars.map(function (b) { return b.volume; }));
   if (chartBars.length) {
     const last = chartBars[chartBars.length - 1].candle.close;
-    candleSeries.applyOptions({ priceFormat: Object.assign({ type: "price" }, chartPrecision(last)) });
+    const format = Object.assign({ type: "price" }, chartPrecision(last));
+    candleSeries.applyOptions({ priceFormat: format });
+    if (stUp) stUp.applyOptions({ priceFormat: format });
+    if (stDn) stDn.applyOptions({ priceFormat: format });
     chartPx = last;
     paintChartQuote();
   }
+  indHoldRange = true;
+  syncIndicators();
+  indHoldRange = false;
   if (keep && range) {
     chartObj.timeScale().setVisibleLogicalRange({
       from: range.from + added,
@@ -1544,12 +1556,16 @@ function applyLiveCandle(c) {
   const dot = $("chart-dot");
   if (dot) dot.setAttribute("data-ticks", String(chartTicks));
   markChartMeta();
+  syncIndicators();
 }
 
 function resetChartHistory() {
   chartBars = [];
   chartHistoryDone = false;
   chartStreamReady = false;
+  indState = null;
+  indLive = null;
+  clearIndicatorOutputs();
   markChartMeta();
 }
 
@@ -1746,6 +1762,869 @@ async function refreshChartPrev() {
   } catch (err) { /* keep the last baseline */ }
 }
 
+// SuperTrend follows the published KivancOzbilgic idea: a trailing band
+// around the average of high and low, offset by a Wilder ATR, that flips
+// when the close crosses the previous band. Smart-money structure, order
+// blocks and fair-value gaps follow the published LuxAlgo idea. This is an
+// independent implementation; that script is not copied.
+const IND_KEY = "tf-chart-indicators";
+const IND_ATR = 10;
+const IND_MULT = 3;
+const IND_SWING = 50;
+const IND_INTERNAL = 5;
+const IND_LABELS = 30;
+const IND_OB = 5;
+const IND_GAPS = 20;
+const ST_UP = "#3dcb8a";
+const ST_DN = "#f07167";
+const IND_TOGGLES = [
+  { key: "st", label: "SuperTrend", title: "ATR 軌道，週期 10、倍數 3，高低均價" },
+  { key: "smc", label: "SMC 結構", title: "擺動與內部的 BOS、CHoCH，以及 HH/HL/LH/LL" },
+  { key: "ob", label: "訂單區 OB", title: "最近 5 個內部與 5 個擺動訂單區" },
+  { key: "fvg", label: "FVG", title: "尚未回補的公允價值缺口" },
+  { key: "eq", label: "等高低", title: "相差在 0.1 倍 ATR 以內的等高與等低" },
+  { key: "pd", label: "溢價折價", title: "最近擺動高低之間的溢價與折價區" }
+];
+
+function loadIndPrefs() {
+  const prefs = { st: true, smc: true, ob: false, fvg: false, eq: false, pd: false };
+  try {
+    const saved = JSON.parse(localStorage.getItem(IND_KEY) || "null");
+    if (!saved) return prefs;
+    Object.keys(prefs).forEach(function (key) {
+      if (typeof saved[key] === "boolean") prefs[key] = saved[key];
+    });
+  } catch (err) { /* keep the defaults */ }
+  return prefs;
+}
+
+function saveIndPrefs() {
+  try { localStorage.setItem(IND_KEY, JSON.stringify(indOn)); } catch (err) { /* private mode */ }
+}
+
+let indOn = loadIndPrefs();
+let indState = null;
+let indLive = null;
+let indPainted = { count: -1, time: 0, on: false, direction: 0, markerKey: "" };
+let indHoldRange = false;
+let stUp = null;
+let stDn = null;
+let stMarkers = null;
+let chartOverlay = null;
+let chartIndView = null;
+
+function trueRange(candle, prevClose) {
+  const span = candle.high - candle.low;
+  if (!Number.isFinite(prevClose)) return span;
+  return Math.max(span, Math.abs(candle.high - prevClose), Math.abs(candle.low - prevClose));
+}
+
+function linePoint(time, value) {
+  return Number.isFinite(value) ? { time: time, value: value } : { time: time };
+}
+
+function emptyClosed() {
+  return {
+    upLine: [],
+    dnLine: [],
+    markers: [],
+    fills: [],
+    atr: NaN,
+    lower: NaN,
+    upper: NaN,
+    direction: null,
+    close: NaN,
+    seedSum: 0,
+    trCount: 0,
+    atrAt: [],
+    swingLines: [],
+    internalLines: [],
+    tags: [],
+    boxes: [],
+    fvgs: [],
+    eqs: [],
+    zone: null,
+    swing: { high: null, low: null, trend: 0, anchorLow: null, anchorHigh: null },
+    internal: { high: null, low: null, trend: 0, anchorLow: null, anchorHigh: null },
+    counts: { bos: 0, choch: 0, swings: 0, ob: 0, fvg: 0, fvgSeen: 0, eq: 0, buys: 0, sells: 0 }
+  };
+}
+
+// Closed bars are everything except the forming candle. The result is cached
+// and only the last candle is stepped while that candle is still open.
+function computeClosed(bars) {
+  const end = Math.max(0, bars.length - 1);
+  const state = emptyClosed();
+  let prevClose = NaN;
+  let prevLower = null;
+  let prevUpper = null;
+  let prevDirection = null;
+  for (let i = 0; i < end; i++) {
+    const candle = bars[i].candle;
+    const tr = trueRange(candle, prevClose);
+    state.trCount += 1;
+    let atr = NaN;
+    if (state.trCount < IND_ATR) state.seedSum += tr;
+    else if (state.trCount === IND_ATR) atr = (state.seedSum + tr) / IND_ATR;
+    else atr = (state.atr * (IND_ATR - 1) + tr) / IND_ATR;
+    state.atrAt.push(atr);
+    let lower = NaN;
+    let upper = NaN;
+    let direction = null;
+    let buy = false;
+    let sell = false;
+    if (Number.isFinite(atr)) {
+      const source = (candle.high + candle.low) / 2;
+      const rawLower = source - IND_MULT * atr;
+      const rawUpper = source + IND_MULT * atr;
+      const basisLower = prevLower == null ? rawLower : prevLower;
+      const basisUpper = prevUpper == null ? rawUpper : prevUpper;
+      const canRatchet = Number.isFinite(prevClose);
+      lower = canRatchet && prevClose > basisLower ? Math.max(rawLower, basisLower) : rawLower;
+      upper = canRatchet && prevClose < basisUpper ? Math.min(rawUpper, basisUpper) : rawUpper;
+      direction = prevDirection == null ? 1 : prevDirection;
+      if (direction === -1 && candle.close > basisUpper) direction = 1;
+      else if (direction === 1 && candle.close < basisLower) direction = -1;
+      buy = direction === 1 && prevDirection === -1;
+      sell = direction === -1 && prevDirection === 1;
+      prevLower = lower;
+      prevUpper = upper;
+      prevDirection = direction;
+      state.atr = atr;
+      state.lower = lower;
+      state.upper = upper;
+      state.direction = direction;
+    }
+    const band = direction === 1 ? lower : (direction === -1 ? upper : NaN);
+    state.upLine.push(linePoint(candle.time, direction === 1 ? lower : NaN));
+    state.dnLine.push(linePoint(candle.time, direction === -1 ? upper : NaN));
+    state.fills.push(direction == null ? null : { time: candle.time, close: candle.close, band: band, bull: direction === 1 });
+    if (buy || sell) {
+      state.markers.push({
+        time: candle.time,
+        position: buy ? "atPriceBottom" : "atPriceTop",
+        price: buy ? lower : upper,
+        shape: "circle",
+        color: buy ? ST_UP : ST_DN,
+        text: buy ? "買" : "賣",
+        size: 1
+      });
+      if (buy) state.counts.buys += 1;
+      else state.counts.sells += 1;
+    }
+    state.close = candle.close;
+    prevClose = candle.close;
+  }
+  const swing = scanStructure(bars, end, IND_SWING, false, state.atrAt);
+  const internal = scanStructure(bars, end, IND_INTERNAL, true, state.atrAt);
+  state.swingLines = swing.lines.slice(-IND_LABELS);
+  state.internalLines = internal.lines.slice(-IND_LABELS);
+  state.tags = swing.tags.slice(-IND_LABELS);
+  state.boxes = swing.boxes.slice(-IND_OB).concat(internal.boxes.slice(-IND_OB));
+  state.swing = swing.active;
+  state.internal = internal.active;
+  state.counts.bos = swing.counts.bos + internal.counts.bos;
+  state.counts.choch = swing.counts.choch + internal.counts.choch;
+  state.counts.swings = swing.counts.swings;
+  state.counts.ob = state.boxes.length;
+  const gaps = scanGaps(bars, end, state.atrAt);
+  state.fvgs = gaps.open;
+  state.counts.fvg = gaps.open.length;
+  state.counts.fvgSeen = gaps.seen;
+  state.eqs = scanEquals(bars, end, state.atrAt);
+  state.counts.eq = state.eqs.length;
+  state.zone = swing.zone;
+  return state;
+}
+
+function isPivot(bars, index, len, end, field) {
+  if (index - len < 0 || index + len >= end) return false;
+  const value = bars[index].candle[field];
+  const higher = field === "high";
+  for (let j = index - len; j <= index + len; j++) {
+    if (j === index) continue;
+    const other = bars[j].candle[field];
+    if (higher ? other >= value : other <= value) return false;
+  }
+  return true;
+}
+
+function orderBlock(bars, breakIndex, anchor, bull) {
+  let stop = Math.max(0, breakIndex - 40);
+  if (anchor != null && anchor < breakIndex) stop = anchor;
+  let opposite = null;
+  let extreme = null;
+  for (let i = breakIndex - 1; i >= stop; i--) {
+    const candle = bars[i].candle;
+    const bearish = candle.close < candle.open;
+    const bullish = candle.close > candle.open;
+    if (!extreme || (bull ? candle.low < extreme.low : candle.high > extreme.high)) {
+      extreme = { index: i, time: candle.time, high: candle.high, low: candle.low };
+    }
+    if (bull && bearish && (!opposite || candle.low < opposite.low)) {
+      opposite = { index: i, time: candle.time, high: candle.high, low: candle.low };
+    }
+    if (!bull && bullish && (!opposite || candle.high > opposite.high)) {
+      opposite = { index: i, time: candle.time, high: candle.high, low: candle.low };
+    }
+  }
+  const picked = opposite || extreme;
+  if (!picked || picked.high <= picked.low) return null;
+  return picked;
+}
+
+function mitigateBoxes(bars, end, boxes) {
+  boxes.forEach(function (box) {
+    for (let i = box.index + 1; i < end; i++) {
+      const candle = bars[i].candle;
+      const hit = box.bull ? candle.low <= box.low : candle.high >= box.high;
+      if (!hit) continue;
+      box.end = candle.time;
+      box.mitigated = true;
+      break;
+    }
+  });
+}
+
+function scanStructure(bars, end, len, internal, atrAt) {
+  const lines = [];
+  const tags = [];
+  const boxes = [];
+  const counts = { bos: 0, choch: 0, swings: 0 };
+  const active = { high: null, low: null, trend: 0, anchorLow: null, anchorHigh: null };
+  let prevHigh = null;
+  let prevLow = null;
+  let lastHigh = null;
+  let lastLow = null;
+  for (let i = len; i < end; i++) {
+    const pivot = i - len;
+    if (isPivot(bars, pivot, len, end, "high")) {
+      const candle = bars[pivot].candle;
+      const point = { index: pivot, time: candle.time, price: candle.high };
+      if (!internal && prevHigh) {
+        const text = point.price > prevHigh.price ? "HH" : "LH";
+        tags.push({ time: point.time, price: point.price, text: text, above: true, bull: text === "HH" });
+        counts.swings += 1;
+      }
+      prevHigh = point;
+      lastHigh = point;
+      active.high = point;
+      active.anchorHigh = pivot;
+    }
+    if (isPivot(bars, pivot, len, end, "low")) {
+      const candle = bars[pivot].candle;
+      const point = { index: pivot, time: candle.time, price: candle.low };
+      if (!internal && prevLow) {
+        const text = point.price > prevLow.price ? "HL" : "LL";
+        tags.push({ time: point.time, price: point.price, text: text, above: false, bull: text === "HL" });
+        counts.swings += 1;
+      }
+      prevLow = point;
+      lastLow = point;
+      active.low = point;
+      active.anchorLow = pivot;
+    }
+    const close = bars[i].candle.close;
+    let broken = null;
+    if (active.high && close > active.high.price) {
+      broken = { bull: true, level: active.high, anchor: active.anchorLow };
+      active.high = null;
+    } else if (active.low && close < active.low.price) {
+      broken = { bull: false, level: active.low, anchor: active.anchorHigh };
+      active.low = null;
+    }
+    if (!broken) continue;
+    const choch = broken.bull ? active.trend === -1 : active.trend === 1;
+    const text = choch ? "CHoCH" : "BOS";
+    lines.push({
+      t1: broken.level.time,
+      t2: bars[i].candle.time,
+      price: broken.level.price,
+      bull: broken.bull,
+      dashed: internal,
+      text: text
+    });
+    if (choch) counts.choch += 1;
+    else counts.bos += 1;
+    active.trend = broken.bull ? 1 : -1;
+    const block = orderBlock(bars, i, broken.anchor, broken.bull);
+    if (block) {
+      boxes.push({
+        index: block.index,
+        time: block.time,
+        high: block.high,
+        low: block.low,
+        bull: broken.bull,
+        internal: internal,
+        end: null,
+        mitigated: false
+      });
+    }
+  }
+  mitigateBoxes(bars, end, boxes);
+  let zone = null;
+  if (!internal && lastHigh && lastLow && lastHigh.price !== lastLow.price) {
+    const top = Math.max(lastHigh.price, lastLow.price);
+    const bottom = Math.min(lastHigh.price, lastLow.price);
+    const later = lastHigh.index > lastLow.index ? lastHigh : lastLow;
+    zone = { time: later.time, top: top, bottom: bottom, mid: (top + bottom) / 2 };
+  }
+  return { lines: lines, tags: tags, boxes: boxes, active: active, counts: counts, zone: zone };
+}
+
+function scanGaps(bars, end, atrAt) {
+  const open = [];
+  let seen = 0;
+  for (let i = 2; i < end; i++) {
+    for (let k = open.length - 1; k >= 0; k--) {
+      const gap = open[k];
+      const candle = bars[i].candle;
+      const filled = gap.bull ? candle.low <= gap.bottom : candle.high >= gap.top;
+      if (filled) open.splice(k, 1);
+    }
+    const gap = gapBetween(bars, i, atrAt);
+    if (!gap) continue;
+    seen += 1;
+    open.push(gap);
+    if (open.length > IND_GAPS * 2) open.shift();
+  }
+  return { open: open.slice(-IND_GAPS), seen: seen };
+}
+
+function gapBetween(bars, index, atrAt) {
+  if (index < 2) return null;
+  const left = bars[index - 2].candle;
+  const right = bars[index].candle;
+  const atr = atrAt && Number.isFinite(atrAt[index]) ? atrAt[index] : NaN;
+  const minWidth = Number.isFinite(atr) ? atr * 0.05 : 0;
+  if (right.low - left.high > minWidth) {
+    return { bull: true, top: right.low, bottom: left.high, time: bars[index - 1].candle.time };
+  }
+  if (left.low - right.high > minWidth) {
+    return { bull: false, top: left.low, bottom: right.high, time: bars[index - 1].candle.time };
+  }
+  return null;
+}
+
+function scanEquals(bars, end, atrAt) {
+  const len = 3;
+  let prevHigh = null;
+  let prevLow = null;
+  const found = [];
+  for (let i = len; i < end; i++) {
+    const pivot = i - len;
+    const atr = atrAt && Number.isFinite(atrAt[i]) ? atrAt[i] : NaN;
+    if (!Number.isFinite(atr) || atr <= 0) continue;
+    const limit = atr * 0.1;
+    if (isPivot(bars, pivot, len, end, "high")) {
+      const point = { index: pivot, time: bars[pivot].candle.time, price: bars[pivot].candle.high };
+      if (prevHigh && pivot - prevHigh.index >= len && pivot - prevHigh.index <= 200 && Math.abs(point.price - prevHigh.price) <= limit) {
+        found.push({
+          t1: prevHigh.time,
+          t2: point.time,
+          price: (point.price + prevHigh.price) / 2,
+          text: "EQH",
+          bull: false
+        });
+      }
+      prevHigh = point;
+    }
+    if (isPivot(bars, pivot, len, end, "low")) {
+      const point = { index: pivot, time: bars[pivot].candle.time, price: bars[pivot].candle.low };
+      if (prevLow && pivot - prevLow.index >= len && pivot - prevLow.index <= 200 && Math.abs(point.price - prevLow.price) <= limit) {
+        found.push({
+          t1: prevLow.time,
+          t2: point.time,
+          price: (point.price + prevLow.price) / 2,
+          text: "EQL",
+          bull: true
+        });
+      }
+      prevLow = point;
+    }
+  }
+  return found.slice(-IND_LABELS);
+}
+
+function stepSuperTrend(state, candle, prevClose) {
+  const tr = trueRange(candle, prevClose);
+  const count = state.trCount + 1;
+  let atr = NaN;
+  if (count < IND_ATR) atr = NaN;
+  else if (count === IND_ATR) atr = (state.seedSum + tr) / IND_ATR;
+  else atr = (state.atr * (IND_ATR - 1) + tr) / IND_ATR;
+  if (!Number.isFinite(atr)) {
+    return { atr: atr, lower: NaN, upper: NaN, direction: null, buy: false, sell: false };
+  }
+  const source = (candle.high + candle.low) / 2;
+  const rawLower = source - IND_MULT * atr;
+  const rawUpper = source + IND_MULT * atr;
+  const basisLower = Number.isFinite(state.lower) ? state.lower : rawLower;
+  const basisUpper = Number.isFinite(state.upper) ? state.upper : rawUpper;
+  const lower = Number.isFinite(prevClose) && prevClose > basisLower ? Math.max(rawLower, basisLower) : rawLower;
+  const upper = Number.isFinite(prevClose) && prevClose < basisUpper ? Math.min(rawUpper, basisUpper) : rawUpper;
+  let direction = state.direction == null ? 1 : state.direction;
+  if (direction === -1 && candle.close > basisUpper) direction = 1;
+  else if (direction === 1 && candle.close < basisLower) direction = -1;
+  return {
+    atr: atr,
+    lower: lower,
+    upper: upper,
+    direction: direction,
+    buy: direction === 1 && state.direction === -1,
+    sell: direction === -1 && state.direction === 1
+  };
+}
+
+function liveBreak(active, candle) {
+  if (active.high && candle.close > active.high.price) {
+    return {
+      bull: true,
+      choch: active.trend === -1,
+      level: active.high,
+      anchor: active.anchorLow
+    };
+  }
+  if (active.low && candle.close < active.low.price) {
+    return {
+      bull: false,
+      choch: active.trend === 1,
+      level: active.low,
+      anchor: active.anchorHigh
+    };
+  }
+  return null;
+}
+
+function decorateLive(state, bars) {
+  const candle = bars[bars.length - 1].candle;
+  const prevClose = Number.isFinite(state.close) ? state.close : NaN;
+  const step = stepSuperTrend(state, candle, prevClose);
+  const upShown = state.upLine.concat([linePoint(candle.time, step.direction === 1 ? step.lower : NaN)]);
+  const dnShown = state.dnLine.concat([linePoint(candle.time, step.direction === -1 ? step.upper : NaN)]);
+  let markers = state.markers;
+  let markerKey = "none";
+  if (step.buy || step.sell) {
+    markers = state.markers.concat([{
+      time: candle.time,
+      position: step.buy ? "atPriceBottom" : "atPriceTop",
+      price: step.buy ? step.lower : step.upper,
+      shape: "circle",
+      color: step.buy ? ST_UP : ST_DN,
+      text: step.buy ? "買" : "賣",
+      size: 1
+    }]);
+    markerKey = candle.time + (step.buy ? "B" : "S");
+  }
+  const liveFill = step.direction == null ? null : {
+    time: candle.time,
+    close: candle.close,
+    band: step.direction === 1 ? step.lower : step.upper,
+    bull: step.direction === 1
+  };
+  const liveLines = [];
+  const liveBoxes = [];
+  [state.swing, state.internal].forEach(function (active, index) {
+    const broken = liveBreak(active, candle);
+    if (!broken) return;
+    liveLines.push({
+      t1: broken.level.time,
+      t2: candle.time,
+      price: broken.level.price,
+      bull: broken.bull,
+      dashed: index === 1,
+      text: broken.choch ? "CHoCH" : "BOS"
+    });
+    const block = orderBlock(bars, bars.length - 1, broken.anchor, broken.bull);
+    if (!block) return;
+    liveBoxes.push({
+      index: block.index,
+      time: block.time,
+      high: block.high,
+      low: block.low,
+      bull: broken.bull,
+      internal: index === 1,
+      end: null,
+      mitigated: false
+    });
+  });
+  const boxes = state.boxes.map(function (box) {
+    if (box.mitigated) return box;
+    const hit = box.bull ? candle.low <= box.low : candle.high >= box.high;
+    if (!hit) return box;
+    return {
+      index: box.index,
+      time: box.time,
+      high: box.high,
+      low: box.low,
+      bull: box.bull,
+      internal: box.internal,
+      end: candle.time,
+      mitigated: true
+    };
+  }).concat(liveBoxes);
+  let fvgs = state.fvgs.filter(function (gap) {
+    return gap.bull ? candle.low > gap.bottom : candle.high < gap.top;
+  });
+  const born = gapBetween(bars, bars.length - 1, state.atrAt.concat([step.atr]));
+  if (born) fvgs = fvgs.concat([born]).slice(-IND_GAPS);
+  return {
+    time: candle.time,
+    direction: step.direction,
+    band: step.direction === 1 ? step.lower : step.upper,
+    upLine: upShown,
+    dnLine: dnShown,
+    markers: markers,
+    markerKey: markerKey,
+    buys: state.counts.buys + (step.buy ? 1 : 0),
+    sells: state.counts.sells + (step.sell ? 1 : 0),
+    view: {
+      fills: state.fills,
+      liveFill: liveFill,
+      upLine: upShown,
+      dnLine: dnShown,
+      swingLines: state.swingLines,
+      internalLines: state.internalLines,
+      liveLines: liveLines,
+      tags: state.tags,
+      boxes: boxes,
+      fvgs: fvgs,
+      eqs: state.eqs,
+      zone: state.zone
+    }
+  };
+}
+
+function indicatorKey() {
+  const count = chartBars.length;
+  if (!count) return "";
+  const closed = count - 1;
+  const tail = closed > 0 ? chartBars[closed - 1].candle.time : 0;
+  return chartCoin + "|" + chartIv.id + "|" + chartBars[0].candle.time + "|" + closed + "|" + tail;
+}
+
+function clearIndicatorOutputs() {
+  indPainted = { count: -1, time: 0, on: false, direction: 0, markerKey: "" };
+  chartIndView = null;
+  if (stUp) stUp.setData([]);
+  if (stDn) stDn.setData([]);
+  if (stMarkers) stMarkers.setMarkers([]);
+  if (chartOverlay) chartOverlay.redraw();
+}
+
+function paintIndicatorOutputs() {
+  if (!stUp || !stDn || !indLive || !chartObj) return;
+  const show = !!indOn.st;
+  const upLine = show ? indLive.upLine : [];
+  const dnLine = show ? indLive.dnLine : [];
+  const replace = indPainted.count !== upLine.length || indPainted.time !== indLive.time || indPainted.on !== show || indPainted.direction !== indLive.direction;
+  if (replace) {
+    const range = indHoldRange ? null : chartObj.timeScale().getVisibleLogicalRange();
+    stUp.setData(upLine);
+    stDn.setData(dnLine);
+    if (range) chartObj.timeScale().setVisibleLogicalRange(range);
+    indPainted.count = upLine.length;
+    indPainted.time = indLive.time;
+    indPainted.on = show;
+    indPainted.direction = indLive.direction;
+  } else if (show && upLine.length) {
+    // This library drops whitespace from a line series, so only the active
+    // band is updated in place. The overlay still breaks the stroke.
+    const upTip = upLine[upLine.length - 1];
+    const dnTip = dnLine[dnLine.length - 1];
+    if (Number.isFinite(upTip.value)) stUp.update(upTip);
+    if (Number.isFinite(dnTip.value)) stDn.update(dnTip);
+  }
+  if (replace || indPainted.markerKey !== indLive.markerKey) {
+    stMarkers.setMarkers(show ? indLive.markers : []);
+    indPainted.markerKey = indLive.markerKey;
+  }
+  chartIndView = indLive.view;
+  chartOverlay.redraw();
+}
+
+function markIndicatorMeta(ms) {
+  const canvas = $("chart-canvas");
+  if (!canvas || !indState || !indLive) return;
+  canvas.setAttribute("data-st-trend", indLive.direction == null ? "" : String(indLive.direction));
+  canvas.setAttribute("data-st-band", Number.isFinite(indLive.band) ? String(indLive.band) : "");
+  canvas.setAttribute("data-st-buys", String(indLive.buys));
+  canvas.setAttribute("data-st-sells", String(indLive.sells));
+  canvas.setAttribute("data-bos", String(indState.counts.bos));
+  canvas.setAttribute("data-choch", String(indState.counts.choch));
+  canvas.setAttribute("data-swings", String(indState.counts.swings));
+  canvas.setAttribute("data-ob", String(indLive.view.boxes.length));
+  canvas.setAttribute("data-fvg", String(indLive.view.fvgs.length));
+  canvas.setAttribute("data-fvg-seen", String(indState.counts.fvgSeen));
+  canvas.setAttribute("data-eq", String(indState.counts.eq));
+  canvas.setAttribute("data-ind-ms", String(ms));
+  canvas.setAttribute("data-ind-error", "");
+  const on = IND_TOGGLES.filter(function (item) { return indOn[item.key]; }).map(function (item) { return item.key; });
+  canvas.setAttribute("data-ind-on", on.join(","));
+}
+
+function syncIndicators() {
+  const canvas = $("chart-canvas");
+  if (!stUp || !chartBars.length) {
+    if (!chartBars.length) clearIndicatorOutputs();
+    return;
+  }
+  try {
+    const started = performance.now();
+    const key = indicatorKey();
+    if (!indState || indState.key !== key) {
+      indState = computeClosed(chartBars);
+      indState.key = key;
+    }
+    indLive = decorateLive(indState, chartBars);
+    paintIndicatorOutputs();
+    markIndicatorMeta(Math.round(performance.now() - started));
+  } catch (err) {
+    if (canvas) canvas.setAttribute("data-ind-error", String((err && err.message) || err));
+  }
+}
+
+function OverlayView(layer) {
+  this._layer = layer;
+  this._renderer = { draw: drawOverlay.bind(null, layer) };
+}
+OverlayView.prototype.zOrder = function () { return this._layer; };
+OverlayView.prototype.renderer = function () { return chartIndView ? this._renderer : null; };
+OverlayView.prototype.update = function () {};
+
+function ChartOverlay() {
+  this._requestUpdate = null;
+  this._views = [new OverlayView("bottom"), new OverlayView("top")];
+}
+ChartOverlay.prototype.attached = function (param) {
+  this._requestUpdate = param.requestUpdate;
+};
+ChartOverlay.prototype.detached = function () {
+  this._requestUpdate = null;
+};
+ChartOverlay.prototype.paneViews = function () { return this._views; };
+ChartOverlay.prototype.redraw = function () {
+  if (this._requestUpdate) this._requestUpdate();
+};
+
+function drawOverlay(layer, target) {
+  const view = chartIndView;
+  if (!view || !chartObj || !candleSeries) return;
+  target.useBitmapCoordinateSpace(function (scope) {
+    try {
+      const ctx = scope.context;
+      const hr = scope.horizontalPixelRatio;
+      const vr = scope.verticalPixelRatio;
+      const ts = chartObj.timeScale();
+      const width = scope.bitmapSize.width;
+      const height = scope.bitmapSize.height;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, width, height);
+      ctx.clip();
+      function xOf(time) {
+        const x = ts.timeToCoordinate(time);
+        return x == null ? null : x * hr;
+      }
+      function yOf(price) {
+        const y = candleSeries.priceToCoordinate(price);
+        return y == null ? null : y * vr;
+      }
+      function rightEdge() {
+        const x = ts.logicalToCoordinate(chartBars.length - 1 + 4);
+        return x == null ? width : x * hr;
+      }
+      if (layer === "bottom") drawOverlayZones(ctx, view, xOf, yOf, rightEdge, hr, vr);
+      else drawOverlayMarks(ctx, view, xOf, yOf, hr, vr, width);
+      ctx.restore();
+    } catch (err) {
+      const canvas = $("chart-canvas");
+      if (canvas) canvas.setAttribute("data-ind-error", String((err && err.message) || err));
+    }
+  });
+}
+
+function drawOverlayZones(ctx, view, xOf, yOf, rightEdge, hr, vr) {
+  if (indOn.st && view.liveFill) drawTrendFill(ctx, view, xOf, yOf);
+  if (indOn.pd && view.zone) {
+    const zone = view.zone;
+    const x1 = xOf(zone.time);
+    const x2 = rightEdge();
+    const top = yOf(zone.top);
+    const mid = yOf(zone.mid);
+    const bottom = yOf(zone.bottom);
+    if (x1 != null && top != null && mid != null && bottom != null) {
+      ctx.fillStyle = "rgba(240,113,103,0.08)";
+      ctx.fillRect(Math.min(x1, x2), Math.min(top, mid), Math.abs(x2 - x1), Math.abs(mid - top));
+      ctx.fillStyle = "rgba(61,203,138,0.08)";
+      ctx.fillRect(Math.min(x1, x2), Math.min(mid, bottom), Math.abs(x2 - x1), Math.abs(bottom - mid));
+      ctx.strokeStyle = "#8b909a";
+      ctx.lineWidth = Math.max(1, hr);
+      ctx.setLineDash([4 * hr, 4 * hr]);
+      ctx.beginPath();
+      ctx.moveTo(x1, mid);
+      ctx.lineTo(x2, mid);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  if (indOn.fvg) {
+    view.fvgs.forEach(function (gap) {
+      paintBox(ctx, xOf, yOf, rightEdge, hr, gap.time, null, gap.top, gap.bottom, gap.bull ? "rgba(122,162,200,0.16)" : "rgba(224,178,90,0.14)", gap.bull ? "rgba(122,162,200,0.7)" : "rgba(224,178,90,0.7)", false);
+    });
+  }
+  if (indOn.ob) {
+    view.boxes.forEach(function (box) {
+      paintBox(ctx, xOf, yOf, rightEdge, hr, box.time, box.mitigated ? box.end : null, box.high, box.low, box.bull ? "rgba(61,203,138,0.16)" : "rgba(240,113,103,0.16)", box.bull ? "rgba(61,203,138,0.75)" : "rgba(240,113,103,0.75)", box.internal);
+    });
+  }
+}
+
+function drawTrendFill(ctx, view, xOf, yOf) {
+  const range = chartObj.timeScale().getVisibleLogicalRange();
+  if (!range) return;
+  const fills = view.fills;
+  const last = fills.length + (view.liveFill ? 1 : 0) - 1;
+  const from = Math.max(0, Math.floor(range.from) - 1);
+  const to = Math.min(last, Math.ceil(range.to) + 1);
+  function pointAt(index) {
+    if (index < fills.length) return fills[index];
+    if (view.liveFill && index === fills.length) return view.liveFill;
+    return null;
+  }
+  for (let i = from; i < to; i++) {
+    const left = pointAt(i);
+    const right = pointAt(i + 1);
+    if (!left || !right || left.bull !== right.bull) continue;
+    const x1 = xOf(left.time);
+    const x2 = xOf(right.time);
+    const yClose1 = yOf(left.close);
+    const yBand1 = yOf(left.band);
+    const yClose2 = yOf(right.close);
+    const yBand2 = yOf(right.band);
+    if (x1 == null || x2 == null || yClose1 == null || yBand1 == null || yClose2 == null || yBand2 == null) continue;
+    ctx.fillStyle = left.bull ? "rgba(61,203,138,0.10)" : "rgba(240,113,103,0.10)";
+    ctx.beginPath();
+    ctx.moveTo(x1, yClose1);
+    ctx.lineTo(x1, yBand1);
+    ctx.lineTo(x2, yBand2);
+    ctx.lineTo(x2, yClose2);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function paintBox(ctx, xOf, yOf, rightEdge, hr, time, end, high, low, fill, stroke, dashed) {
+  const x1 = xOf(time);
+  const x2 = end == null ? rightEdge() : xOf(end);
+  const y1 = yOf(high);
+  const y2 = yOf(low);
+  if (x1 == null || x2 == null || y1 == null || y2 == null) return;
+  const left = Math.min(x1, x2);
+  const top = Math.min(y1, y2);
+  const w = Math.max(Math.abs(x2 - x1), hr);
+  const h = Math.max(Math.abs(y2 - y1), vrSafe(hr));
+  ctx.fillStyle = fill;
+  ctx.fillRect(left, top, w, h);
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = Math.max(1, hr);
+  ctx.setLineDash(dashed ? [4 * hr, 3 * hr] : []);
+  ctx.strokeRect(left, top, w, h);
+  ctx.setLineDash([]);
+}
+
+function vrSafe(hr) { return hr; }
+
+function drawOverlayMarks(ctx, view, xOf, yOf, hr, vr, width) {
+  if (indOn.eq) {
+    view.eqs.forEach(function (item) {
+      paintHLine(ctx, xOf, yOf, hr, item.t1, item.t2, item.price, item.bull ? ST_UP : ST_DN, true);
+      paintTag(ctx, item.text, xOf(item.t2), yOf(item.price), item.bull ? ST_UP : ST_DN, hr, vr, !item.bull, width);
+    });
+  }
+  if (indOn.pd && view.zone) {
+    const mid = yOf(view.zone.mid);
+    const x = xOf(view.zone.time);
+    if (mid != null && x != null) paintTag(ctx, "均衡", x, mid, "#8b909a", hr, vr, true, width);
+  }
+  if (indOn.st) {
+    // Line series in this library drop whitespace instead of breaking the
+    // stroke, which would connect the two trends. The series still hold each
+    // band; the overlay draws those points and lifts the pen on the gaps.
+    strokeBand(ctx, view.upLine, ST_UP, xOf, yOf, hr);
+    strokeBand(ctx, view.dnLine, ST_DN, xOf, yOf, hr);
+  }
+  if (!indOn.smc) return;
+  view.swingLines.concat(view.internalLines, view.liveLines).forEach(function (line) {
+    paintHLine(ctx, xOf, yOf, hr, line.t1, line.t2, line.price, line.bull ? ST_UP : ST_DN, line.dashed);
+    paintTag(ctx, line.text, xOf(line.t2), yOf(line.price), line.bull ? ST_UP : ST_DN, hr, vr, line.bull, width);
+  });
+  view.tags.forEach(function (tag) {
+    paintTag(ctx, tag.text, xOf(tag.time), yOf(tag.price), tag.bull ? ST_UP : ST_DN, hr, vr, tag.above, width);
+  });
+}
+
+function strokeBand(ctx, points, color, xOf, yOf, hr) {
+  if (!points || !points.length || !chartObj) return;
+  const range = chartObj.timeScale().getVisibleLogicalRange();
+  if (!range) return;
+  const from = Math.max(0, Math.floor(range.from) - 1);
+  const to = Math.min(points.length - 1, Math.ceil(range.to) + 1);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(1, Math.round(hr * 1.5));
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  let drawing = false;
+  for (let i = from; i <= to; i++) {
+    const point = points[i];
+    if (!point || !Number.isFinite(point.value)) {
+      drawing = false;
+      continue;
+    }
+    const x = xOf(point.time);
+    const y = yOf(point.value);
+    if (x == null || y == null) {
+      drawing = false;
+      continue;
+    }
+    if (!drawing) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+    drawing = true;
+  }
+  ctx.stroke();
+}
+
+function paintHLine(ctx, xOf, yOf, hr, t1, t2, price, color, dashed) {
+  const x1 = xOf(t1);
+  const x2 = xOf(t2);
+  const y = yOf(price);
+  if (x1 == null || x2 == null || y == null) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(1, hr);
+  ctx.setLineDash(dashed ? [5 * hr, 4 * hr] : []);
+  ctx.beginPath();
+  ctx.moveTo(x1, y);
+  ctx.lineTo(x2, y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function paintTag(ctx, text, x, y, color, hr, vr, above, width) {
+  if (x == null || y == null || x < -80 || x > width + 80) return;
+  ctx.save();
+  ctx.font = Math.round(10 * vr) + 'px "Noto Sans TC", sans-serif';
+  const pad = Math.round(3 * hr);
+  const box = Math.round(14 * vr);
+  const measured = ctx.measureText(text).width;
+  const top = above ? y - box - Math.round(3 * vr) : y + Math.round(3 * vr);
+  ctx.fillStyle = "rgba(20,23,30,0.84)";
+  ctx.fillRect(x, top, measured + pad * 2, box);
+  ctx.fillStyle = color;
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x + pad, top + box / 2);
+  ctx.restore();
+}
+
 function bootChart() {
   const coins = $("chart-coins");
   const ivs = $("chart-ivs");
@@ -1780,6 +2659,28 @@ function bootChart() {
     });
     ivs.appendChild(btn);
   });
+  const inds = $("chart-inds");
+  if (inds) {
+    IND_TOGGLES.forEach(function (item) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chart-chip";
+      btn.textContent = item.label;
+      btn.title = item.title;
+      btn.setAttribute("data-ind", item.key);
+      btn.addEventListener("click", function () {
+        indOn[item.key] = !indOn[item.key];
+        saveIndPrefs();
+        paintChartChips();
+        indPainted.count = -1;
+        if (indLive) {
+          paintIndicatorOutputs();
+          markIndicatorMeta(0);
+        }
+      });
+      inds.appendChild(btn);
+    });
+  }
   paintChartChips();
   if (!window.LightweightCharts || !canvas) {
     const note = $("chart-note");
@@ -1830,6 +2731,18 @@ function bootChart() {
   });
   chartObj.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.28 } });
   volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+  const lineOpts = {
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+    lineVisible: false,
+    lineWidth: 2
+  };
+  stUp = chartObj.addSeries(LightweightCharts.LineSeries, Object.assign({ color: ST_UP }, lineOpts));
+  stDn = chartObj.addSeries(LightweightCharts.LineSeries, Object.assign({ color: ST_DN }, lineOpts));
+  stMarkers = LightweightCharts.createSeriesMarkers(candleSeries, [], { autoScale: false, zOrder: "top" });
+  chartOverlay = new ChartOverlay();
+  candleSeries.attachPrimitive(chartOverlay);
   chartObj.timeScale().subscribeVisibleLogicalRangeChange(function (range) {
     const host = $("chart-canvas");
     if (host && range) {
