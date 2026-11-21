@@ -8,6 +8,12 @@ A trade is a unique oid that had at least one fill in that Taipei day.
 (for example the account was funded later that day), use the last
 account value before the first fill of the day.
 
+startEquity is separate from that percentage basis. It is the account
+value nearest 00:00 Taipei, used as the day's risk equity. A sample more
+than 10 minutes from midnight is marked approximate. Unified accounts
+are spot USDC, which already matches margin account value and already
+includes unrealized P&L; spot and perp are not added together.
+
 A closed trade is a unique oid with at least one fill whose closedPnl is
 nonzero. It is a win when sum(closedPnl) - USDC fees on that oid's fills
 is greater than 0, otherwise a loss. Opening-only orders are not counted.
@@ -178,6 +184,7 @@ def comparable_days(days: list[dict]) -> list[dict]:
     keys = (
         "date", "pnl", "pct", "startValue", "closedPnl", "fees", "funding",
         "trades", "fills", "complete", "wins", "losses", "win_rate",
+        "startEquity", "startEquityMs", "startEquityApprox",
     )
     out = []
     for d in days:
@@ -232,7 +239,13 @@ def last_value_in(snaps: list[tuple[int, float]], start: int, end: int) -> float
 
 
 def current_equity() -> tuple[float, float]:
-    """Return (equity, unrealizedPnl) for the unified or standard account."""
+    """Return (equity, unrealizedPnl) for the unified or standard account.
+
+    On a unified account, spot USDC total and marginSummary.accountValue are
+    the same number, and that number already includes unrealized P&L
+    (raw USD + mark notional). Adding the perp account value, or adding
+    unrealized P&L a second time, would count the same equity twice.
+    """
     ch = post({"type": "clearinghouseState", "user": ACCOUNT}) or {}
     spot = post({"type": "spotClearinghouseState", "user": ACCOUNT}) or {}
     abstr = post({"type": "userAbstraction", "user": ACCOUNT})
@@ -250,7 +263,10 @@ def current_equity() -> tuple[float, float]:
             usdc_total = n0(b.get("total"))
             break
     unified = mode in ("unifiedAccount", "portfolioMargin")
-    equity = (usdc_total + upnl) if unified else (perp_value + usdc_total)
+    if unified:
+        equity = usdc_total if usdc_total > 0 else perp_value
+    else:
+        equity = perp_value + usdc_total
     return equity, upnl
 
 
@@ -420,10 +436,133 @@ def _win_loss(oid_net: dict) -> tuple[int, int]:
     return wins, losses
 
 
+# A 00:05 Taipei capture is a few minutes after midnight. Farther than this
+# and the sample is only the nearest portfolio print, so the page says so.
+START_EQUITY_EXACT_MS = 10 * 60 * 1000
+START_EQUITY_MAX_MS = 12 * 60 * 60 * 1000
+
+
+def equity_sample(
+    snaps: list[tuple[int, float]], target_ms: int, max_ms: int
+) -> tuple[int, float] | None:
+    """Portfolio point closest to target. Ties prefer a point at or before it."""
+    best: tuple[int, float] | None = None
+    best_key: tuple[int, int, int] | None = None
+    for ts, value in snaps:
+        dist = abs(int(ts) - target_ms)
+        if dist > max_ms:
+            continue
+        key = (dist, 0 if int(ts) <= target_ms else 1, int(ts))
+        if best_key is None or key < best_key:
+            best_key = key
+            best = (int(ts), value)
+    return best
+
+
+def fresh_start_equity(
+    snaps: list[tuple[int, float]], target_ms: int
+) -> dict | None:
+    sample = equity_sample(snaps, target_ms, START_EQUITY_MAX_MS)
+    if sample is None:
+        return None
+    ms, value = sample
+    return {
+        "startEquity": r(value, VAL_DEC),
+        "startEquityMs": int(ms),
+        "startEquityApprox": abs(int(ms) - target_ms) > START_EQUITY_EXACT_MS,
+    }
+
+
+def _sample_dist(day: dict | None, target_ms: int) -> int | None:
+    if not isinstance(day, dict):
+        return None
+    ms = day.get("startEquityMs")
+    if not isinstance(ms, (int, float)):
+        return None
+    if day.get("startEquity") is None:
+        return None
+    return abs(int(ms) - target_ms)
+
+
+def prefer_start_equity(stored: dict | None, fresh: dict | None, target_ms: int) -> dict | None:
+    """Keep the sample closer to midnight. A later run must not replace it."""
+    if fresh is None and (stored is None or stored.get("startEquity") is None):
+        return None
+    if fresh is None:
+        return {
+            "startEquity": stored.get("startEquity"),
+            "startEquityMs": stored.get("startEquityMs"),
+            "startEquityApprox": stored.get("startEquityApprox"),
+        }
+    if _sample_dist(stored, target_ms) is None:
+        return fresh
+    stored_dist = _sample_dist(stored, target_ms)
+    fresh_dist = _sample_dist(fresh, target_ms)
+    if fresh_dist is None or (stored_dist is not None and stored_dist <= fresh_dist):
+        return {
+            "startEquity": stored.get("startEquity"),
+            "startEquityMs": stored.get("startEquityMs"),
+            "startEquityApprox": stored.get("startEquityApprox"),
+        }
+    return fresh
+
+
+def blank_day(date_str: str, today: str) -> dict:
+    return {
+        "date": date_str,
+        "pnl": 0.0,
+        "pct": None,
+        "startValue": None,
+        "closedPnl": 0.0,
+        "fees": 0.0,
+        "funding": 0.0,
+        "trades": 0,
+        "fills": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": None,
+        "complete": date_str < today,
+    }
+
+
+def attach_start_equities(
+    days: list[dict],
+    existing_days: list[dict],
+    snaps: list[tuple[int, float]],
+    now_ms: int,
+) -> list[dict]:
+    """Record account value nearest 00:00 Taipei on every stored day."""
+    today = today_date(now_ms)
+    stored_by = {
+        str(d.get("date")): d
+        for d in existing_days
+        if isinstance(d, dict) and d.get("date")
+    }
+    if today not in {d.get("date") for d in days}:
+        days.append(blank_day(today, today))
+        days.sort(key=lambda d: str(d.get("date")))
+    for day in days:
+        date_str = str(day.get("date") or "")
+        if not date_str:
+            continue
+        target = midnight_ms(date_str)
+        fresh = fresh_start_equity(snaps, target)
+        chosen = prefer_start_equity(stored_by.get(date_str), fresh, target)
+        if chosen is None:
+            day["startEquity"] = None
+            day["startEquityMs"] = None
+            day["startEquityApprox"] = None
+        else:
+            day["startEquity"] = chosen.get("startEquity")
+            day["startEquityMs"] = chosen.get("startEquityMs")
+            day["startEquityApprox"] = chosen.get("startEquityApprox")
+    return days
+
+
 def ensure_win_fields(day: dict) -> dict:
     """Old stored days the API can no longer recompute keep null win fields."""
     out = dict(day)
-    for key in ("wins", "losses", "win_rate"):
+    for key in ("wins", "losses", "win_rate", "startEquity", "startEquityMs", "startEquityApprox"):
         out.setdefault(key, None)
     return out
 
@@ -539,6 +678,7 @@ def main() -> int:
     fresh = bucket_days(fills, funding, snaps, reconstructed, now_ms)
     earliest = min((d["date"] for d in fresh), default=None)
     days = merge_days(existing_days, fresh, earliest)
+    days = attach_start_equities(days, existing_days, snaps, now_ms)
     payload = build_payload(days, now_ms)
 
     prev_cmp = comparable_days(
@@ -552,15 +692,24 @@ def main() -> int:
     if changed or not OUT_PATH.is_file():
         write_json(OUT_PATH, payload)
     n_trade_days = sum(1 for d in days if int(d.get("trades") or 0) > 0)
+    today_row = next((d for d in days if d.get("date") == today_date(now_ms)), None)
     if not changed and OUT_PATH.is_file():
         push_note = "no change in daily P&L days; skipped push"
     elif not pushes_enabled():
         push_note = "git push left to the caller"
     else:
         push_note = maybe_push(OUT_PATH, True)
+    equity_note = ""
+    if today_row is not None:
+        equity_note = (
+            f"; {today_row.get('date')} startEquity {today_row.get('startEquity')}"
+            f" at {today_row.get('startEquityMs')}"
+            f" approx={today_row.get('startEquityApprox')}"
+        )
     summary = (
         f"wrote {OUT_PATH} with {len(days)} day(s), {n_trade_days} trading day(s); "
         + push_note
+        + equity_note
     )
     print(summary)
     return 0

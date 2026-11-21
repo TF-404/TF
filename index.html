@@ -419,7 +419,7 @@
     </section>
 
     <footer>
-      資料來源：Hyperliquid 主網公開 info API（<span style="font-family:var(--mono)">POST https://api.hyperliquid.xyz/info</span>）。本頁不含金鑰，也不會向交易所送出任何交易指令。帳戶為統一帳戶（unifiedAccount），現貨 USDC 是抵押品；永續帳戶權益與現貨餘額分開顯示，不會重複加總。交易台本金以 min(帳戶權益, 20 USD) 計算。
+      資料來源：Hyperliquid 主網公開 info API（<span style="font-family:var(--mono)">POST https://api.hyperliquid.xyz/info</span>）。本頁不含金鑰，也不會向交易所送出任何交易指令。帳戶為統一帳戶（unifiedAccount），現貨 USDC 是抵押品，已含未實現損益；永續帳戶權益與現貨餘額分開顯示，不會重複加總。風險以當日 00:00 台北時間的帳戶權益為本金。
     </footer>
   </div>
 
@@ -428,15 +428,14 @@
 /* PARSE_START */
 const ADDR = "0xc70E03319051E7C4CE2556c064022090869012e4";
 const API = "https://api.hyperliquid.xyz/info";
-const DESK_CAP = 20;
-const DAILY_STOP_PCT = 0.02;
-const DAILY_STOP = -(DESK_CAP * DAILY_STOP_PCT);
 const POLL_MS = 15000;
 const TZ = "Asia/Taipei";
 const HIST_URL = "data/daily-pnl.json";
 const RISK_URL = "data/risk-limits.json";
 const CAL_WEEKS = 22;
 let histDays = [];
+let riskDoc = null;
+let lastAccount = null;
 let histLoadedAt = 0;
 let histError = "";
 let selectedCalDate = null;
@@ -658,8 +657,10 @@ function parseAccount(data, nowMs) {
   const marginUsed = n0(margin.totalMarginUsed);
   const withdrawable = n0(ch.withdrawable);
   const unified = mode === "unifiedAccount" || mode === "portfolioMargin";
-  const equity = unified ? (usdc.total + upnl) : (perpValue + usdc.total);
-  const bankroll = Math.min(equity, DESK_CAP);
+  // Spot USDC total equals margin account value and already includes
+  // unrealized P&L. Adding the perp value, or adding unrealized P&L again,
+  // would count the same equity twice.
+  const equity = unified ? (usdc.total > 0 ? usdc.total : perpValue) : (perpValue + usdc.total);
   const orders = flattenOrders(data.frontendOpenOrders);
   const fills = Array.isArray(data.userFills) ? data.userFills.slice() : [];
   fills.sort(function (a, b) { return n0(b.time) - n0(a.time); });
@@ -681,7 +682,6 @@ function parseAccount(data, nowMs) {
     withdrawable: withdrawable,
     upnl: upnl,
     equity: equity,
-    bankroll: bankroll,
     positions: positions,
     orders: orders,
     fills: fills.slice(0, 50),
@@ -734,8 +734,8 @@ function renderOverview(s) {
     { label: "永續帳戶權益", value: fmtMoney(s.perpValue), hint: s.unified ? "統一帳戶下此欄通常不是本金，請看下方帳戶權益" : "永續保證金帳戶價值（含未實現損益）", extra: "" },
     { label: "已用保證金", value: fmtMoney(s.marginUsed), hint: "目前持倉占用的保證金", extra: "" },
     { label: "可出金／可用", value: fmtMoney(after), hint: "現貨維持保證金後可用 " + fmtMoney(after) + "；永續可出金 " + fmtMoney(s.withdrawable), extra: "" },
-    { label: "帳戶權益（不重複加總）", value: fmtMoney(s.equity), hint: s.unified ? "統一帳戶：現貨 USDC＋未實現損益，不與永續帳戶權益相加" : "現貨 USDC＋永續帳戶權益", extra: s.upnl ? ("未實現損益 " + fmtMoney(s.upnl)) : "" },
-    { label: "交易台本金", value: fmtMoney(s.bankroll), hint: "min(帳戶權益, $20)，交易台只按這筆計算風險", extra: s.equity > DESK_CAP ? ("帳戶權益 " + fmtMoney(s.equity) + "，超出部分不納入交易台") : "" }
+    { label: "帳戶權益（不重複加總）", value: fmtMoney(s.equity), hint: s.unified ? "統一帳戶：現貨 USDC 就是帳戶權益，已含未實現損益，不與永續帳戶權益相加" : "現貨 USDC＋永續帳戶權益", extra: s.upnl ? ("未實現損益 " + fmtMoney(s.upnl) + "，已含在權益內") : "" },
+    { label: "今日本金", value: (function () { const b = equityBasis(s.equity); return b ? fmtMoney(b.value) : "—"; })(), hint: "當日 00:00 台北時間的帳戶權益，風險按這筆計算", extra: (function () { const b = equityBasis(s.equity); return b ? basisNote(b) : ""; })() }
   ];
   $("overview").innerHTML = cards.map(function (c) {
     return '<div class="card"><div class="label">' + esc(c.label) + '</div><div class="value">' + esc(c.value) + '</div><div class="hint">' + esc(c.hint) + (c.extra ? "<br>" + esc(c.extra) : "") + "</div></div>";
@@ -744,19 +744,23 @@ function renderOverview(s) {
 
 function renderPnl(s) {
   const net = s.day.net;
-  const stop = DAILY_STOP;
-  const toward = stop < 0 ? Math.min(1, Math.max(0, net / stop)) : 0;
-  const remain = stop - Math.min(net, 0);
+  const basis = equityBasis(s.equity);
+  const pct = riskDoc ? num(riskDoc.dailyStopPct) : NaN;
+  const stop = basis && Number.isFinite(pct) ? basis.value * pct / 100 : NaN;
+  const haveStop = Number.isFinite(stop) && stop < 0;
+  const toward = haveStop ? Math.min(1, Math.max(0, net / stop)) : 0;
   let fillCls = "bar-fill";
-  let status = "距離每日停損還有 " + fmtMoney(Math.max(0, -stop - Math.max(0, -net)));
-  if (net <= stop) {
+  let status = haveStop
+    ? "距離每日停損還有 " + fmtMoney(Math.max(0, -stop - Math.max(0, -net)))
+    : "每日停損依今日本金計算";
+  if (haveStop && net <= stop) {
     fillCls += " stop";
-    status = "已達每日停損（-" + (DAILY_STOP_PCT * 100) + "% ／ " + fmtMoney(stop) + "），交易台不應再開新倉，直到你書面重置。";
+    status = "已達每日停損（" + fmtSignedPct(pct) + " ／ " + fmtMoney(stop) + "）。";
   } else if (toward >= 0.6) {
     fillCls += " warn";
   }
-  if (net > 0) status = "今日已實現為正；每日停損線在 " + fmtMoney(stop) + "。";
-  if (s.day.count === 0 && s.upnl === 0) status = "今日尚無成交。停損線為 " + fmtMoney(stop) + "（$20 的 2%）。";
+  if (haveStop && net > 0) status = "今日已實現為正；每日停損線在 " + fmtMoney(stop) + "。";
+  if (haveStop && s.day.count === 0 && s.upnl === 0) status = "今日尚無成交。停損線為 " + fmtMoney(stop) + "（今日本金的 " + fmtSignedPct(Math.abs(pct)) + "）。";
 
   $("pnl-card").innerHTML =
     '<div class="pnl-hero">' +
@@ -767,7 +771,7 @@ function renderPnl(s) {
         '<div class="hint">合計參考 ' + '<span class="' + clsPnL(net + s.upnl) + '">' + esc(fmtMoney(net + s.upnl)) + "</span>；進度條依已實現損益對每日停損計算</div></div>" +
     "</div>" +
     '<div class="bar-wrap"><div class="bar-track"><div class="' + fillCls + '" style="width:' + (toward * 100).toFixed(1) + '%"></div></div>' +
-    '<div class="bar-meta"><span>' + esc(status) + "</span><span>每日停損 " + esc(fmtMoney(stop)) + "</span></div></div>";
+    '<div class="bar-meta"><span>' + esc(status) + "</span><span>每日停損 " + (haveStop ? esc(fmtMoney(stop)) : "—") + "</span></div></div>";
 }
 
 function renderPositions(s) {
@@ -883,29 +887,102 @@ function riskChip(label, strong, rest) {
   return '<span class="chip">' + esc(label) + " <b>" + esc(strong) + "</b>" + (rest ? esc(rest) : "") + "</span>";
 }
 
-function renderRiskLimits(doc) {
+function equityBasis(live) {
+  const today = taipeiDateStr(Date.now());
+  const day = (histDays || []).find(function (d) { return d && d.date === today; });
+  const snap = day ? num(day.startEquity) : NaN;
+  if (Number.isFinite(snap) && snap > 0) {
+    return {
+      value: snap,
+      approx: !!day.startEquityApprox,
+      ms: num(day.startEquityMs),
+      fallback: false
+    };
+  }
+  if (Number.isFinite(num(live)) && num(live) > 0) {
+    return { value: num(live), approx: true, fallback: true, ms: NaN };
+  }
+  return null;
+}
+
+function basisNote(basis) {
+  if (!basis) return "";
+  if (basis.fallback) return "（尚無 00:00 快照，暫以目前權益計算）";
+  if (!basis.approx) return "";
+  if (!Number.isFinite(basis.ms)) return "（近似）";
+  const when = new Intl.DateTimeFormat("zh-TW", {
+    timeZone: TZ, month: "numeric", day: "numeric",
+    hour: "2-digit", minute: "2-digit", hour12: false
+  }).format(new Date(basis.ms));
+  const midnight = Date.parse(taipeiDateStr(Date.now()) + "T00:00:00+08:00");
+  const mins = Math.round(Math.abs(basis.ms - midnight) / 60000);
+  const side = basis.ms <= midnight ? "前" : "後";
+  return "（近似，" + when + "，00:00 " + side + " " + mins + " 分）";
+}
+
+function pctOfBasis(basis, pct) {
+  if (!basis || !Number.isFinite(num(pct))) return NaN;
+  return basis.value * num(pct) / 100;
+}
+
+function leverageCapNote(doc) {
+  const caps = doc.coinLeverageCaps && typeof doc.coinLeverageCaps === "object" ? doc.coinLeverageCaps : {};
+  const order = Array.isArray(doc.coins) ? doc.coins.slice() : [];
+  Object.keys(caps).forEach(function (name) {
+    if (order.indexOf(name) < 0) order.push(name);
+  });
+  const names = order.filter(function (name) { return caps[name] != null && caps[name] !== ""; });
+  const grouped = [];
+  const byCap = {};
+  names.forEach(function (name) {
+    const key = String(caps[name]);
+    if (!byCap[key]) {
+      byCap[key] = [];
+      grouped.push(key);
+    }
+    byCap[key].push(name);
+  });
+  return grouped.map(function (key) { return byCap[key].join("、") + " " + key + " 倍"; }).join("，");
+}
+
+function renderRiskLimits(doc, account) {
   const host = $("risk-limits");
   if (!host || !doc) return;
   const coins = Array.isArray(doc.coins) ? doc.coins.filter(Boolean) : [];
-  const caps = doc.coinLeverageCaps && typeof doc.coinLeverageCaps === "object" ? doc.coinLeverageCaps : {};
-  const capText = Object.keys(caps).map(function (name) {
-    return name + " " + caps[name] + " 倍";
-  }).join("、");
+  const capText = leverageCapNote(doc);
   const levRest = capText ? "（不超過各幣上限，" + capText + "）" : "（不超過各幣上限）";
-  const stopRest = "（以 " + fmtMoney(doc.equityCapUsd, 0) + " 計為 " + fmtMoney(doc.dailyStopUsd) + "）";
+  const live = account ? num(account.equity) : NaN;
+  const basis = equityBasis(live);
+  const perUsd = pctOfBasis(basis, doc.riskPerTradePct);
+  const totalUsd = pctOfBasis(basis, doc.maxTotalRiskPct);
+  const stopUsd = pctOfBasis(basis, doc.dailyStopPct);
+  const moneyRest = function (usd) {
+    return Number.isFinite(usd) ? "（" + fmtMoney(usd) + "）" : "";
+  };
   host.innerHTML = [
-    riskChip("本金上限", fmtMoney(doc.equityCapUsd, 0), ""),
-    riskChip("每筆風險", fmtSignedPct(doc.riskPerTradePct), "（" + fmtMoney(doc.riskPerTradeUsd) + "）"),
+    riskChip("今日本金", basis ? fmtMoney(basis.value) : "—", basis ? basisNote(basis) : ""),
+    riskChip("目前權益", Number.isFinite(live) ? fmtMoney(live) : "—", ""),
+    riskChip("每筆風險", fmtSignedPct(doc.riskPerTradePct), moneyRest(perUsd)),
+    riskChip("總風險", fmtSignedPct(doc.maxTotalRiskPct), moneyRest(totalUsd)),
     riskChip("最高槓桿", String(doc.maxLeverage) + " 倍", levRest),
     riskChip("最多同時持倉", String(doc.maxPositions) + " 倉", ""),
     riskChip("只做", coins.join(" / "), " " + (doc.instrument || "永續")),
-    riskChip("每日停損", fmtSignedPct(doc.dailyStopPct), stopRest),
+    riskChip("每日停損", fmtSignedPct(doc.dailyStopPct), moneyRest(stopUsd)),
     riskChip("滑價", String(doc.slippageBps) + " bps", "")
   ].join("");
   host.setAttribute("data-ready", "1");
+  host.setAttribute("data-version", String(doc.version));
   host.setAttribute("data-leverage", String(doc.maxLeverage));
   host.setAttribute("data-risk-pct", String(doc.riskPerTradePct));
-  host.setAttribute("data-version", String(doc.version));
+  host.setAttribute("data-total-pct", String(doc.maxTotalRiskPct));
+  host.setAttribute("data-stop-pct", String(doc.dailyStopPct));
+  host.setAttribute("data-basis", basis ? String(basis.value) : "");
+  host.setAttribute("data-approx", basis && basis.approx ? "1" : "0");
+  host.setAttribute("data-fallback", basis && basis.fallback ? "1" : "0");
+  host.setAttribute("data-live", Number.isFinite(live) ? String(live) : "");
+  host.setAttribute("data-risk-usd", Number.isFinite(perUsd) ? perUsd.toFixed(2) : "");
+  host.setAttribute("data-total-usd", Number.isFinite(totalUsd) ? totalUsd.toFixed(2) : "");
+  host.setAttribute("data-stop-usd", Number.isFinite(stopUsd) ? stopUsd.toFixed(2) : "");
 }
 
 async function loadRiskLimits() {
@@ -914,7 +991,12 @@ async function loadRiskLimits() {
   try {
     const res = await fetch(RISK_URL + "?t=" + taipeiDateStr(Date.now()), { cache: "no-cache" });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    renderRiskLimits(await res.json());
+    riskDoc = await res.json();
+    renderRiskLimits(riskDoc, lastAccount);
+    if (lastAccount) {
+      renderOverview(lastAccount);
+      renderPnl(lastAccount);
+    }
   } catch (err) {
     host.innerHTML = '<span class="chip">限額暫時無法載入</span>';
     host.setAttribute("data-ready", "0");
@@ -1260,6 +1342,7 @@ function renderCalendar(s) {
 
 
 function renderAll(s) {
+  lastAccount = s;
   renderOverview(s);
   renderPnl(s);
   renderCalendar(s);
@@ -1268,6 +1351,7 @@ function renderAll(s) {
   renderFills(s);
   renderFunding(s);
   chartSyncPosition(s);
+  if (riskDoc) renderRiskLimits(riskDoc, s);
 }
 
 async function hl(body) {
