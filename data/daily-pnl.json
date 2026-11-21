@@ -3,21 +3,24 @@
   "cutoff": "00:00",
   "days": [
     {
-      "closedPnl": 15.432461,
+      "closedPnl": 45.180261,
       "complete": false,
       "date": "2026-11-21",
-      "fees": 4.429566,
-      "fills": 32,
-      "funding": 0.002054,
-      "pct": 22.4127,
-      "pnl": 11.004949,
+      "fees": 6.414931,
+      "fills": 43,
+      "funding": -0.030256,
+      "losses": 7,
+      "pct": 78.8879,
+      "pnl": 38.735074,
       "startValue": 49.101441,
-      "trades": 27
+      "trades": 33,
+      "win_rate": 56.25,
+      "wins": 9
     }
   ],
   "method": "sum(closedPnl) - USDC fill fees + funding; deposits and withdrawals excluded",
   "timezone": "Asia/Taipei",
-  "updatedAt": "2026-11-21T18:02:02+08:00",
-  "updatedAtMs": 1795255322546,
+  "updatedAt": "2026-11-21T22:04:29+08:00",
+  "updatedAtMs": 1795269869666,
   "version": 1
 }

@@ -8,6 +8,11 @@ A trade is a unique oid that had at least one fill in that Taipei day.
 (for example the account was funded later that day), use the last
 account value before the first fill of the day.
 
+A closed trade is a unique oid with at least one fill whose closedPnl is
+nonzero. It is a win when sum(closedPnl) - USDC fees on that oid's fills
+is greater than 0, otherwise a loss. Opening-only orders are not counted.
+wins, losses and win_rate stay null on stored days the API no longer returns.
+
 Idempotent: safe to run repeatedly. The days payload is compared without
 updatedAt, and the file is rewritten only when a day actually changed.
 Set HL_PNL_NO_PUSH=1 (the GitHub Action does this) to skip the built-in
@@ -170,7 +175,10 @@ def load_existing(path: Path) -> dict:
 
 
 def comparable_days(days: list[dict]) -> list[dict]:
-    keys = ("date", "pnl", "pct", "startValue", "closedPnl", "fees", "funding", "trades", "fills", "complete")
+    keys = (
+        "date", "pnl", "pct", "startValue", "closedPnl", "fees", "funding",
+        "trades", "fills", "complete", "wins", "losses", "win_rate",
+    )
     out = []
     for d in days:
         out.append({k: d.get(k) for k in keys})
@@ -333,6 +341,8 @@ def bucket_days(
         "oids": set(),
         "fills": 0,
         "first_fill": None,
+        # oid -> [sum closedPnl, sum USDC fee, saw a nonzero closedPnl]
+        "oid_net": {},
     })
     for f in fills:
         t = int(n0(f.get("time")))
@@ -340,12 +350,23 @@ def bucket_days(
             continue
         day = taipei_date(t)
         b = buckets[day]
-        b["closedPnl"] += n0(f.get("closedPnl"))
+        closed = n0(f.get("closedPnl"))
+        b["closedPnl"] += closed
+        fee = 0.0
         if str(f.get("feeToken") or "USDC").upper() == "USDC":
-            b["fees"] += n0(f.get("fee"))
+            fee = n0(f.get("fee"))
+            b["fees"] += fee
         oid = f.get("oid")
         if oid is not None:
             b["oids"].add(oid)
+            slot = b["oid_net"].get(oid)
+            if slot is None:
+                slot = [0.0, 0.0, False]
+                b["oid_net"][oid] = slot
+            slot[0] += closed
+            slot[1] += fee
+            if closed != 0.0:
+                slot[2] = True
         b["fills"] += 1
         if b["first_fill"] is None or t < b["first_fill"]:
             b["first_fill"] = t
@@ -365,6 +386,8 @@ def bucket_days(
         if start_v is not None and start_v > 1e-9:
             pct = r(pnl / start_v * 100.0, PCT_DEC)
         complete = date_str < today
+        wins, losses = _win_loss(b["oid_net"])
+        closed_n = wins + losses
         days.append({
             "date": date_str,
             "pnl": r(pnl, PNL_DEC),
@@ -375,9 +398,34 @@ def bucket_days(
             "funding": r(b["funding"], PNL_DEC),
             "trades": int(len(b["oids"])),
             "fills": int(b["fills"]),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": r(wins / closed_n * 100.0, PCT_DEC) if closed_n else None,
             "complete": complete,
         })
     return days
+
+
+def _win_loss(oid_net: dict) -> tuple[int, int]:
+    """Count closed oids. A net above zero is a win; zero or below is a loss."""
+    wins = 0
+    losses = 0
+    for closed_sum, fee_sum, hit in oid_net.values():
+        if not hit:
+            continue
+        if closed_sum - fee_sum > 0:
+            wins += 1
+        else:
+            losses += 1
+    return wins, losses
+
+
+def ensure_win_fields(day: dict) -> dict:
+    """Old stored days the API can no longer recompute keep null win fields."""
+    out = dict(day)
+    for key in ("wins", "losses", "win_rate"):
+        out.setdefault(key, None)
+    return out
 
 
 def merge_days(existing: list[dict], fresh: list[dict], earliest_api_day: str | None) -> list[dict]:
@@ -386,9 +434,9 @@ def merge_days(existing: list[dict], fresh: list[dict], earliest_api_day: str | 
     for d in existing:
         if not isinstance(d, dict) or not d.get("date"):
             continue
-        by_date[str(d["date"])] = d
+        by_date[str(d["date"])] = ensure_win_fields(d)
     for d in fresh:
-        by_date[d["date"]] = d
+        by_date[d["date"]] = ensure_win_fields(d)
     if earliest_api_day:
         # Drop incomplete stale rows that fall inside the API window but
         # were not returned this run only if we successfully recomputed

@@ -147,7 +147,10 @@
       display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
       gap: 8px 14px; margin-bottom: 12px;
     }
-    .cal-title { font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+    .cal-title {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+      min-width: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.02em;
+    }
     .cal-legend {
       display: flex; align-items: center; gap: 4px;
       font-size: 11px; color: var(--faint); user-select: none;
@@ -817,11 +820,77 @@ function dayLine(d, opts) {
     parts.push("無交易");
   }
   if (trades > 0) parts.push(trades + " 筆");
+  const winBit = dayWinText(d);
+  if (winBit) parts.push(winBit);
   const mid = parts.join(" · ");
   const hasLabel = opts && Object.prototype.hasOwnProperty.call(opts, "dateLabel");
   const label = hasLabel ? (opts.dateLabel || "") : (d.date || "");
   const tag = (opts && opts.tag) ? opts.tag : "";
   return (label ? (label + tag + "  ") : "") + mid;
+}
+
+function closedTradeStats(fills) {
+  const byOid = {};
+  (fills || []).forEach(function (f) {
+    if (!f || f.oid == null) return;
+    const key = String(f.oid);
+    if (!byOid[key]) byOid[key] = { closed: 0, fee: 0, hit: false };
+    const cp = n0(f.closedPnl);
+    byOid[key].closed += cp;
+    const token = String(f.feeToken || "USDC").trim().toUpperCase();
+    if (token === "USDC") byOid[key].fee += n0(f.fee);
+    if (cp !== 0) byOid[key].hit = true;
+  });
+  let wins = 0;
+  let losses = 0;
+  Object.keys(byOid).forEach(function (key) {
+    const st = byOid[key];
+    if (!st.hit) return;
+    if (st.closed - st.fee > 0) wins += 1;
+    else losses += 1;
+  });
+  const total = wins + losses;
+  return {
+    wins: wins,
+    losses: losses,
+    win_rate: total > 0 ? (wins / total * 100) : null
+  };
+}
+
+function fmtRateCompact(v) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "";
+  const rounded = Math.round(n * 10) / 10;
+  const text = Math.abs(rounded - Math.round(rounded)) < 1e-9
+    ? String(Math.round(rounded))
+    : rounded.toFixed(1);
+  return text + "%";
+}
+
+function dayWinText(d) {
+  if (!d) return "";
+  const w = num(d.wins);
+  const l = num(d.losses);
+  if (!Number.isFinite(w) || !Number.isFinite(l)) return "";
+  const total = w + l;
+  if (total <= 0) return "";
+  const rate = w / total * 100;
+  return "勝率 " + fmtRateCompact(rate) + "（" + Math.round(w) + "/" + Math.round(total) + "）";
+}
+
+function overallWinText(days) {
+  let wins = 0;
+  let losses = 0;
+  (days || []).forEach(function (d) {
+    const w = num(d && d.wins);
+    const l = num(d && d.losses);
+    if (!Number.isFinite(w) || !Number.isFinite(l)) return;
+    wins += w;
+    losses += l;
+  });
+  const total = wins + losses;
+  if (total <= 0) return "";
+  return "勝率 " + fmtRateCompact(wins / total * 100) + "（" + Math.round(wins) + "勝 " + Math.round(losses) + "敗）";
 }
 
 function liveToday(s) {
@@ -838,6 +907,7 @@ function liveToday(s) {
   dayFills.forEach(function (f) {
     if (f && f.oid != null) oids[f.oid] = true;
   });
+  const record = closedTradeStats(dayFills);
   const closed = s.day ? s.day.realized : 0;
   const fees = s.day ? s.day.fees : 0;
   const pnl = closed - fees + funding;
@@ -854,6 +924,9 @@ function liveToday(s) {
     funding: funding,
     trades: Object.keys(oids).length,
     fills: s.day ? s.day.count : dayFills.length,
+    wins: record.wins,
+    losses: record.losses,
+    win_rate: record.win_rate,
     complete: false
   };
 }
@@ -939,7 +1012,10 @@ function renderCalendar(s) {
 
   let html = "";
   html += '<div class="cal-head">';
-  html += '<div class="cal-title">' + totalCells + " 天中有 " + tradeDays + " 天交易</div>";
+  const winHead = overallWinText(days);
+  html += '<div class="cal-title"><span>' + totalCells + " 天中有 " + tradeDays + " 天交易</span>";
+  if (winHead) html += '<span class="cal-win">' + winHead + "</span>";
+  html += "</div>";
   html += '<div class="cal-legend"><span>虧損</span>';
   ["l4","l3","l2","l1"].forEach(function (c) { html += '<span class="cal-swatch cal-cell ' + c + '"></span>'; });
   html += '<span class="cal-swatch cal-cell"></span>';
