@@ -142,6 +142,62 @@
     footer {
       margin-top: 28px; color: var(--faint); font-size: 11px; line-height: 1.6;
     }
+
+    .cal-head {
+      display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+      gap: 8px 14px; margin-bottom: 12px;
+    }
+    .cal-title { font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+    .cal-legend {
+      display: flex; align-items: center; gap: 4px;
+      font-size: 11px; color: var(--faint); user-select: none;
+    }
+    .cal-legend .cal-swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; cursor: default; pointer-events: none; }
+    .cal-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 2px 0 8px; }
+    .cal-wrap { display: flex; gap: 6px; width: max-content; min-width: 100%; }
+    .cal-dows {
+      display: grid; grid-template-rows: 16px repeat(7, 12px); gap: 3px;
+      flex: 0 0 auto; color: var(--faint); font-size: 10px; line-height: 12px;
+    }
+    .cal-dows span { display: block; text-align: right; padding-right: 2px; }
+    .cal-weeks { display: flex; gap: 3px; }
+    .cal-week { display: grid; grid-template-rows: 16px repeat(7, 12px); gap: 3px; }
+    .cal-month {
+      font-size: 10px; color: var(--faint); line-height: 16px; white-space: nowrap;
+      letter-spacing: 0.02em;
+    }
+    .cal-cell {
+      width: 12px; height: 12px; border-radius: 3px;
+      background: #1c212b; border: 1px solid rgba(255,255,255,0.04);
+      padding: 0; display: block; cursor: pointer; appearance: none;
+    }
+    .cal-cell:hover, .cal-cell:focus-visible { outline: 1px solid var(--gold); outline-offset: 1px; }
+    .cal-cell.is-selected { outline: 1px solid var(--gold); outline-offset: 1px; }
+    .cal-cell.is-future { visibility: hidden; pointer-events: none; }
+    .cal-cell.p1 { background: #16382c; border-color: rgba(61,203,138,0.12); }
+    .cal-cell.p2 { background: #1c6a4a; border-color: rgba(61,203,138,0.18); }
+    .cal-cell.p3 { background: #2aa56d; border-color: rgba(61,203,138,0.28); }
+    .cal-cell.p4 { background: #3dcb8a; border-color: rgba(61,203,138,0.4); }
+    .cal-cell.l1 { background: #3a2224; border-color: rgba(240,113,103,0.12); }
+    .cal-cell.l2 { background: #8a3a38; border-color: rgba(240,113,103,0.18); }
+    .cal-cell.l3 { background: #c2554e; border-color: rgba(240,113,103,0.28); }
+    .cal-cell.l4 { background: #f07167; border-color: rgba(240,113,103,0.4); }
+    .cal-hint { color: var(--faint); font-size: 11px; margin: 2px 0 8px; }
+    .cal-detail {
+      min-height: 1.5em; font-size: 13px; font-variant-numeric: tabular-nums;
+      color: var(--text); margin: 0 0 12px;
+    }
+    .cal-detail .when { color: var(--muted); margin-right: 8px; }
+    .cal-recent { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+    .cal-recent li {
+      display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px;
+      font-size: 13px; font-variant-numeric: tabular-nums;
+      padding: 8px 0; border-top: 1px solid var(--line-soft);
+    }
+    .cal-recent li:first-child { border-top: 0; padding-top: 0; }
+    .cal-recent .when { color: var(--muted); }
+    .cal-recent .amt { font-weight: 600; }
+
     @media (max-width: 800px) {
       .cards { grid-template-columns: 1fr 1fr; }
       .card.span-2 { grid-column: span 2; }
@@ -154,6 +210,8 @@
       .cards { grid-template-columns: 1fr; }
       .card.span-2 { grid-column: span 1; }
       .wrap { padding: 16px 12px 48px; }
+      .cal-cell, .cal-legend .cal-swatch { width: 11px; height: 11px; }
+      .cal-dows, .cal-week { grid-template-rows: 16px repeat(7, 11px); }
       .block-head h2 { flex: 0 0 auto; white-space: nowrap; }
       .block-head .sub { min-width: 0; }
       .bar-meta { flex-direction: column; align-items: stretch; gap: 4px; }
@@ -222,6 +280,17 @@
       <div class="card" id="pnl-card"></div>
     </section>
 
+
+    <section class="block" id="calendar-block">
+      <div class="block-head">
+        <h2>每日損益</h2>
+        <div class="sub">每日結算：台北 00:00 · 含手動交易，永久記錄</div>
+      </div>
+      <div class="card" id="calendar-card">
+        <div class="empty">載入日曆中…</div>
+      </div>
+    </section>
+
     <section class="block">
       <div class="block-head">
         <h2>持倉</h2>
@@ -268,6 +337,12 @@ const DAILY_STOP_PCT = 0.02;
 const DAILY_STOP = -(DESK_CAP * DAILY_STOP_PCT);
 const POLL_MS = 15000;
 const TZ = "Asia/Taipei";
+const HIST_URL = "data/daily-pnl.json";
+const CAL_WEEKS = 22;
+let histDays = [];
+let histLoadedAt = 0;
+let histError = "";
+let selectedCalDate = null;
 
 function num(v) {
   if (v == null || v === "") return NaN;
@@ -494,6 +569,7 @@ function parseAccount(data, nowMs) {
   const since = taipeiMidnightMs(nowMs);
   const dayFillsSrc = Array.isArray(data.userFillsByTime) ? data.userFillsByTime : fills;
   const day = realizedFromFills(dayFillsSrc, since);
+  const dayFills = (Array.isArray(dayFillsSrc) ? dayFillsSrc : []).filter(function (f) { return n0(f && f.time) >= since; });
   const funding = Array.isArray(data.userFunding) ? data.userFunding.slice() : [];
   funding.sort(function (a, b) { return n0(b.time) - n0(a.time); });
   const fundingSum = funding.reduce(function (s, row) {
@@ -514,6 +590,7 @@ function parseAccount(data, nowMs) {
     fills: fills.slice(0, 50),
     fillsTotal: fills.length,
     day: day,
+    _dayFills: dayFills,
     funding: funding,
     fundingSum: fundingSum,
     since: since
@@ -697,9 +774,276 @@ function renderFunding(s) {
     "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 }
 
+
+function taipeiDateStr(ms) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit"
+  }).format(new Date(ms));
+}
+
+function addTaipeiDays(ymd, n) {
+  return taipeiDateStr(Date.parse(ymd + "T00:00:00+08:00") + n * 86400000);
+}
+
+function taipeiDow(ymd) {
+  return new Date(Date.parse(ymd + "T00:00:00+08:00") + 8 * 3600 * 1000).getUTCDay();
+}
+
+function fmtPct(v) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "";
+  const sign = n > 0 ? "+" : (n < 0 ? "−" : "");
+  return sign + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
+}
+
+function fmtSignedMoney(v) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : (n < 0 ? "−" : "");
+  return sign + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function dayLine(d, opts) {
+  if (!d) return "無交易";
+  const trades = Number(d.trades) || 0;
+  const pnl = num(d.pnl);
+  const parts = [];
+  if (Number.isFinite(pnl) && (pnl !== 0 || trades > 0)) {
+    let s = fmtSignedMoney(pnl);
+    const pct = fmtPct(d.pct);
+    if (pct) s += " (" + pct + ")";
+    parts.push(s);
+  } else {
+    parts.push("無交易");
+  }
+  if (trades > 0) parts.push(trades + " 筆");
+  const mid = parts.join(" · ");
+  const hasLabel = opts && Object.prototype.hasOwnProperty.call(opts, "dateLabel");
+  const label = hasLabel ? (opts.dateLabel || "") : (d.date || "");
+  const tag = (opts && opts.tag) ? opts.tag : "";
+  return (label ? (label + tag + "  ") : "") + mid;
+}
+
+function liveToday(s) {
+  if (!s) return null;
+  const date = taipeiDateStr(Date.now());
+  const since = s.since;
+  let funding = 0;
+  (s.funding || []).forEach(function (row) {
+    const t = n0(row && row.time);
+    if (t >= since) funding += n0(row && row.delta ? row.delta.usdc : 0);
+  });
+  const dayFills = (s._dayFills || []).filter(function (f) { return n0(f.time) >= since; });
+  const oids = {};
+  dayFills.forEach(function (f) {
+    if (f && f.oid != null) oids[f.oid] = true;
+  });
+  const closed = s.day ? s.day.realized : 0;
+  const fees = s.day ? s.day.fees : 0;
+  const pnl = closed - fees + funding;
+  const stored = (histDays || []).find(function (d) { return d.date === date; }) || {};
+  const startValue = Number.isFinite(num(stored.startValue)) ? num(stored.startValue) : NaN;
+  const pct = Number.isFinite(startValue) && startValue > 0 ? (pnl / startValue * 100) : null;
+  return {
+    date: date,
+    pnl: pnl,
+    pct: pct,
+    startValue: Number.isFinite(startValue) ? startValue : null,
+    closedPnl: closed,
+    fees: fees,
+    funding: funding,
+    trades: Object.keys(oids).length,
+    fills: s.day ? s.day.count : dayFills.length,
+    complete: false
+  };
+}
+
+function mergedDays(s) {
+  const map = {};
+  (histDays || []).forEach(function (d) {
+    if (d && d.date) map[d.date] = d;
+  });
+  const today = liveToday(s);
+  if (today) map[today.date] = today;
+  return Object.keys(map).sort().map(function (k) { return map[k]; });
+}
+
+function cellClass(d, maxAbs) {
+  if (!d) return "";
+  const pnl = num(d.pnl);
+  const trades = Number(d.trades) || 0;
+  if (!Number.isFinite(pnl) || (pnl === 0 && trades === 0)) return "";
+  if (pnl === 0) return "";
+  const mag = Math.abs(pnl);
+  const cap = maxAbs > 0 ? maxAbs : mag;
+  const ratio = cap > 0 ? mag / cap : 0;
+  let lvl = 1;
+  if (ratio >= 0.75) lvl = 4;
+  else if (ratio >= 0.45) lvl = 3;
+  else if (ratio >= 0.2) lvl = 2;
+  return (pnl > 0 ? "p" : "l") + lvl;
+}
+
+function formatZhDate(ymd) {
+  const p = ymd.split("-");
+  if (p.length !== 3) return ymd;
+  return Number(p[1]) + "/" + Number(p[2]);
+}
+
+async function loadDailyHistory() {
+  try {
+    const res = await fetch(HIST_URL + "?t=" + taipeiDateStr(Date.now()), { cache: "no-cache" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    histDays = Array.isArray(data.days) ? data.days : [];
+    histLoadedAt = Date.now();
+    histError = "";
+  } catch (err) {
+    if (!histDays.length) histError = "尚無永久紀錄檔，先顯示今日即時資料。";
+  }
+}
+
+function renderCalendar(s) {
+  const card = $("calendar-card");
+  if (!card) return;
+  const today = taipeiDateStr(Date.now());
+  const dowToday = taipeiDow(today);
+  const gridStart = addTaipeiDays(today, -(dowToday + (CAL_WEEKS - 1) * 7));
+  const days = mergedDays(s);
+  const byDate = {};
+  days.forEach(function (d) { if (d && d.date) byDate[d.date] = d; });
+  let maxAbs = 0;
+  days.forEach(function (d) {
+    const n = Math.abs(num(d.pnl));
+    if (Number.isFinite(n) && n > maxAbs) maxAbs = n;
+  });
+
+  let totalCells = 0;
+  let tradeDays = 0;
+  const weeks = [];
+  for (let w = 0; w < CAL_WEEKS; w++) {
+    const weekStart = addTaipeiDays(gridStart, w * 7);
+    const cells = [];
+    for (let i = 0; i < 7; i++) {
+      const ymd = addTaipeiDays(weekStart, i);
+      const future = ymd > today;
+      const d = byDate[ymd] || null;
+      if (!future) {
+        totalCells += 1;
+        if (d && (Number(d.trades) || 0) > 0) tradeDays += 1;
+      }
+      cells.push({ date: ymd, future: future, data: d });
+    }
+    weeks.push({ start: weekStart, cells: cells });
+  }
+
+  let html = "";
+  html += '<div class="cal-head">';
+  html += '<div class="cal-title">' + totalCells + " 天中有 " + tradeDays + " 天交易</div>";
+  html += '<div class="cal-legend"><span>虧損</span>';
+  ["l4","l3","l2","l1"].forEach(function (c) { html += '<span class="cal-swatch cal-cell ' + c + '"></span>'; });
+  html += '<span class="cal-swatch cal-cell"></span>';
+  ["p1","p2","p3","p4"].forEach(function (c) { html += '<span class="cal-swatch cal-cell ' + c + '"></span>'; });
+  html += "<span>獲利</span></div></div>";
+
+  html += '<div class="cal-scroll"><div class="cal-wrap">';
+  html += '<div class="cal-dows"><span></span>';
+  const dows = ["日","","一","","二","","三","","四","","五","","六"];
+  // only label 日 三 六 like a compact GitHub grid, plus 一? GitHub uses Mon Wed Fri in some locales. We'll label 日 三 五.
+  const dowLabel = ["日","","","三","","五",""];
+  dowLabel.forEach(function (lb) { html += "<span>" + lb + "</span>"; });
+  html += "</div><div class=\"cal-weeks\">";
+
+  let lastMonth = "";
+  weeks.forEach(function (week, wi) {
+    html += '<div class="cal-week">';
+    const firstVisible = week.cells[0].date;
+    const month = firstVisible.slice(0, 7);
+    const dayNum = Number(firstVisible.slice(8, 10));
+    let monthLabel = "";
+    // Label a week if it contains the 1st, or it is the first week of the grid and the month has not been labeled.
+    const hasFirst = week.cells.some(function (c) { return Number(c.date.slice(8, 10)) === 1 && !c.future; });
+    if (hasFirst || (wi === 0) || month !== lastMonth && dayNum <= 7) {
+      if (month !== lastMonth) {
+        monthLabel = String(Number(month.slice(5, 7))) + "月";
+        lastMonth = month;
+      }
+    }
+    html += '<div class="cal-month">' + monthLabel + "</div>";
+    week.cells.forEach(function (c) {
+      const cls = ["cal-cell"];
+      if (c.future) cls.push("is-future");
+      else cls.push(cellClass(c.data, maxAbs));
+      if (selectedCalDate === c.date) cls.push("is-selected");
+      const label = c.future ? "" : dayLine(c.data, { dateLabel: c.date, tag: (c.date === today ? "（今日，進行中）" : "") });
+      html += '<button type="button" class="' + cls.filter(Boolean).join(" ") + '" data-date="' + c.date + '" ' +
+        (c.future ? "tabindex='-1' aria-hidden='true'" : ('aria-label="' + esc(label) + '" title="' + esc(label) + '"')) +
+        "></button>";
+    });
+    html += "</div>";
+  });
+  html += "</div></div></div>";
+  html += '<div class="cal-hint">點選或滑過格子可看當日金額、百分比與成交筆數。綠色為獲利、紅色為虧損。</div>';
+  const focus = selectedCalDate || today;
+  const focusData = byDate[focus] || (focus === today ? liveToday(s) : null);
+  const focusTag = focus === today ? "（今日，進行中）" : "";
+  html += '<div class="cal-detail" id="cal-detail"><span class="when">' + esc(focus) + esc(focusTag) + "</span>";
+  if (focusData && ((Number(focusData.trades) || 0) > 0 || num(focusData.pnl))) {
+    html += '<span class="amt ' + clsPnL(focusData.pnl) + '">' + esc(dayLine(focusData, { dateLabel: "" })) + "</span>";
+  } else if (focus > today) {
+    html += "<span class='amt'>尚未開始</span>";
+  } else {
+    html += "<span class='amt'>無交易</span>";
+  }
+  html += "</div>";
+
+  const recent = days.filter(function (d) {
+    return d && d.date && ((Number(d.trades) || 0) > 0 || (Number.isFinite(num(d.pnl)) && num(d.pnl) !== 0));
+  }).sort(function (a, b) { return a.date < b.date ? 1 : -1; }).slice(0, 14);
+  if (recent.length) {
+    html += '<ul class="cal-recent">';
+    recent.forEach(function (d) {
+      const tag = d.date === today ? "（今日，進行中）" : "";
+      html += '<li><span class="when">' + esc(formatZhDate(d.date)) + esc(tag) + '</span><span class="amt ' + clsPnL(d.pnl) + '">' +
+        esc(dayLine(d, { dateLabel: "" })) + "</span></li>";
+    });
+    html += "</ul>";
+  } else {
+    html += '<div class="empty" style="padding:8px 0 0">尚無交易日紀錄</div>';
+  }
+  if (histError) html += '<div class="hint">' + esc(histError) + "</div>";
+  card.innerHTML = html;
+
+  card.querySelectorAll(".cal-cell[data-date]").forEach(function (btn) {
+    if (btn.classList.contains("is-future")) return;
+    const ymd = btn.getAttribute("data-date");
+    const show = function () {
+      selectedCalDate = ymd;
+      const detail = $("cal-detail");
+      if (!detail) return;
+      const d = byDate[ymd] || null;
+      const tag = ymd === today ? "（今日，進行中）" : "";
+      let body = '<span class="when">' + esc(ymd) + esc(tag) + "</span>";
+      if (d && ((Number(d.trades) || 0) > 0 || num(d.pnl))) {
+        body += '<span class="amt ' + clsPnL(d.pnl) + '">' + esc(dayLine(d, { dateLabel: "" })) + "</span>";
+      } else {
+        body += "<span class='amt'>無交易</span>";
+      }
+      detail.innerHTML = body;
+      card.querySelectorAll(".cal-cell.is-selected").forEach(function (el) { el.classList.remove("is-selected"); });
+      btn.classList.add("is-selected");
+    };
+    btn.addEventListener("mouseenter", show);
+    btn.addEventListener("focus", show);
+    btn.addEventListener("click", show);
+  });
+}
+
+
 function renderAll(s) {
   renderOverview(s);
   renderPnl(s);
+  renderCalendar(s);
   renderPositions(s);
   renderOrders(s);
   renderFills(s);
@@ -737,7 +1081,8 @@ async function refresh(manual) {
       hl({ type: "frontendOpenOrders", user: ADDR }),
       hl({ type: "userFills", user: ADDR }),
       hl({ type: "userFillsByTime", user: ADDR, startTime: startDay }),
-      hl({ type: "userFunding", user: ADDR, startTime: startFunding })
+      hl({ type: "userFunding", user: ADDR, startTime: startFunding }),
+      loadDailyHistory()
     ]);
     const snapshot = {
       userAbstraction: results[0],

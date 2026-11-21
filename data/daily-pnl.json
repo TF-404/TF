@@ -1,0 +1,23 @@
+{
+  "account": "0xc70E03319051E7C4CE2556c064022090869012e4",
+  "cutoff": "00:00",
+  "days": [
+    {
+      "closedPnl": 15.432461,
+      "complete": false,
+      "date": "2026-11-21",
+      "fees": 4.429566,
+      "fills": 32,
+      "funding": 0.002054,
+      "pct": 22.4127,
+      "pnl": 11.004949,
+      "startValue": 49.101441,
+      "trades": 27
+    }
+  ],
+  "method": "sum(closedPnl) - USDC fill fees + funding; deposits and withdrawals excluded",
+  "timezone": "Asia/Taipei",
+  "updatedAt": "2026-11-21T18:02:02+08:00",
+  "updatedAtMs": 1795255322546,
+  "version": 1
+}
