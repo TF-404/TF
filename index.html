@@ -361,14 +361,8 @@
         <div class="sub">由你在 Risk Manager 設定，此處只做展示、不會改動</div>
       </div>
       <div class="card">
-        <div class="limits">
-          <span class="chip">每筆風險 <b>0.5%</b></span>
-          <span class="chip">總風險 <b>4%</b></span>
-          <span class="chip">最高槓桿 <b>10 倍</b>（不超過各幣上限，XMR 5 倍）</span>
-          <span class="chip">最多同時持倉 <b>8 倉</b></span>
-          <span class="chip">只做 <b>BTC / ETH / HYPE / ZEC / SOL / XRP / NEAR / XMR</b> 永續</span>
-          <span class="chip">每日停損 <b>-2%</b>（以 $20 計為 -$0.40）</span>
-          <span class="chip">滑價 <b>10 bps</b></span>
+        <div class="limits" id="risk-limits">
+          <span class="chip">限額讀取中…</span>
         </div>
       </div>
     </section>
@@ -440,6 +434,7 @@ const DAILY_STOP = -(DESK_CAP * DAILY_STOP_PCT);
 const POLL_MS = 15000;
 const TZ = "Asia/Taipei";
 const HIST_URL = "data/daily-pnl.json";
+const RISK_URL = "data/risk-limits.json";
 const CAL_WEEKS = 22;
 let histDays = [];
 let histLoadedAt = 0;
@@ -876,6 +871,55 @@ function renderFunding(s) {
     "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 }
 
+
+function fmtSignedPct(v) {
+  const n = num(v);
+  if (!Number.isFinite(n)) return "—";
+  const sign = n < 0 ? "−" : "";
+  return sign + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 2 }) + "%";
+}
+
+function riskChip(label, strong, rest) {
+  return '<span class="chip">' + esc(label) + " <b>" + esc(strong) + "</b>" + (rest ? esc(rest) : "") + "</span>";
+}
+
+function renderRiskLimits(doc) {
+  const host = $("risk-limits");
+  if (!host || !doc) return;
+  const coins = Array.isArray(doc.coins) ? doc.coins.filter(Boolean) : [];
+  const caps = doc.coinLeverageCaps && typeof doc.coinLeverageCaps === "object" ? doc.coinLeverageCaps : {};
+  const capText = Object.keys(caps).map(function (name) {
+    return name + " " + caps[name] + " 倍";
+  }).join("、");
+  const levRest = capText ? "（不超過各幣上限，" + capText + "）" : "（不超過各幣上限）";
+  const stopRest = "（以 " + fmtMoney(doc.equityCapUsd, 0) + " 計為 " + fmtMoney(doc.dailyStopUsd) + "）";
+  host.innerHTML = [
+    riskChip("本金上限", fmtMoney(doc.equityCapUsd, 0), ""),
+    riskChip("每筆風險", fmtSignedPct(doc.riskPerTradePct), "（" + fmtMoney(doc.riskPerTradeUsd) + "）"),
+    riskChip("最高槓桿", String(doc.maxLeverage) + " 倍", levRest),
+    riskChip("最多同時持倉", String(doc.maxPositions) + " 倉", ""),
+    riskChip("只做", coins.join(" / "), " " + (doc.instrument || "永續")),
+    riskChip("每日停損", fmtSignedPct(doc.dailyStopPct), stopRest),
+    riskChip("滑價", String(doc.slippageBps) + " bps", "")
+  ].join("");
+  host.setAttribute("data-ready", "1");
+  host.setAttribute("data-leverage", String(doc.maxLeverage));
+  host.setAttribute("data-risk-pct", String(doc.riskPerTradePct));
+  host.setAttribute("data-version", String(doc.version));
+}
+
+async function loadRiskLimits() {
+  const host = $("risk-limits");
+  if (!host) return;
+  try {
+    const res = await fetch(RISK_URL + "?t=" + taipeiDateStr(Date.now()), { cache: "no-cache" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    renderRiskLimits(await res.json());
+  } catch (err) {
+    host.innerHTML = '<span class="chip">限額暫時無法載入</span>';
+    host.setAttribute("data-ready", "0");
+  }
+}
 
 function taipeiDateStr(ms) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -1322,6 +1366,7 @@ function boot() {
     if (document.visibilityState === "visible") refresh(false);
   });
   refresh(false);
+  loadRiskLimits();
   timer = setInterval(loop, POLL_MS);
   startCountdown();
   bootChart();

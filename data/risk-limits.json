@@ -1,0 +1,17 @@
+{
+  "version": 4,
+  "source": "risk-limits.md v4",
+  "equityCapUsd": 20,
+  "riskPerTradePct": 2,
+  "riskPerTradeUsd": 0.4,
+  "maxPositions": 8,
+  "maxLeverage": 10,
+  "coinLeverageCaps": {
+    "XMR": 5
+  },
+  "coins": ["BTC", "ETH", "HYPE", "ZEC", "SOL", "XRP", "NEAR", "XMR"],
+  "instrument": "永續",
+  "dailyStopPct": -2,
+  "dailyStopUsd": -0.4,
+  "slippageBps": 10
+}
