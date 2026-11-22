@@ -296,7 +296,7 @@
           <button class="btn" type="button" id="refresh-btn">立即更新</button>
         </div>
         <div class="updated" id="updated">最後更新：—</div>
-        <div class="updated" id="countdown">每 15 秒自動更新</div>
+        <div class="updated" id="countdown" data-feed="boot">每秒更新</div>
       </div>
     </header>
 
@@ -428,7 +428,8 @@
 /* PARSE_START */
 const ADDR = "0xc70E03319051E7C4CE2556c064022090869012e4";
 const API = "https://api.hyperliquid.xyz/info";
-const POLL_MS = 15000;
+const RENDER_MS = 1000;
+const SLOW_MS = 15000;
 const TZ = "Asia/Taipei";
 const HIST_URL = "data/daily-pnl.json";
 const RISK_URL = "data/risk-limits.json";
@@ -682,6 +683,7 @@ function parseAccount(data, nowMs) {
     withdrawable: withdrawable,
     upnl: upnl,
     equity: equity,
+    rawUsd: n0(margin.totalRawUsd),
     positions: positions,
     orders: orders,
     fills: fills.slice(0, 50),
@@ -1341,17 +1343,21 @@ function renderCalendar(s) {
 }
 
 
-function renderAll(s) {
+function renderFast(s) {
   lastAccount = s;
   renderOverview(s);
   renderPnl(s);
-  renderCalendar(s);
   renderPositions(s);
   renderOrders(s);
-  renderFills(s);
-  renderFunding(s);
   chartSyncPosition(s);
   if (riskDoc) renderRiskLimits(riskDoc, s);
+}
+
+function renderAll(s) {
+  renderFast(s);
+  renderCalendar(s);
+  renderFills(s);
+  renderFunding(s);
 }
 
 async function hl(body) {
@@ -1366,14 +1372,273 @@ async function hl(body) {
 
 let inFlight = false;
 let lastOk = 0;
-let timer = null;
 let tickTimer = null;
+let slowTimer = null;
+let pollTimer = null;
+let pollDelay = 1000;
+let acctWs = null;
+let acctWsLive = false;
+let acctDelay = 1000;
+let acctReconnect = null;
+let acctFeed = "boot";
+let shownFeed = "";
+let liveCh = null;
+let liveSpot = null;
+let liveOrders = null;
+let slowMode = "";
+let slowFills = null;
+let slowFillsByTime = null;
+let slowFunding = null;
+const marks = {};
+const ACCT_COINS = ["BTC", "ETH", "HYPE", "ZEC", "SOL", "XRP", "NEAR", "XMR"];
+
+function applyMarks(state) {
+  if (!state || !state.positions || !state.positions.length) return state;
+  let ntl = 0;
+  let upnl = 0;
+  let used = false;
+  state.positions.forEach(function (p) {
+    const mark = num(marks[p.coin]);
+    if (Number.isFinite(mark) && Number.isFinite(p.entry)) {
+      p.mark = mark;
+      p.upnl = (mark - p.entry) * p.szi;
+      p.positionValue = Math.abs(p.szi) * mark;
+      used = true;
+    }
+    ntl += Math.abs(num(p.positionValue) || 0);
+    upnl += p.upnl;
+  });
+  state.upnl = upnl;
+  if (used && Number.isFinite(state.rawUsd)) {
+    const equity = state.rawUsd + ntl;
+    state.perpValue = equity;
+    if (state.unified) state.equity = equity;
+  }
+  return state;
+}
+
+function accountState() {
+  if (!liveCh) return null;
+  const state = parseAccount({
+    userAbstraction: slowMode || "",
+    clearinghouseState: liveCh,
+    spotClearinghouseState: liveSpot || {},
+    frontendOpenOrders: liveOrders || [],
+    userFills: slowFills || [],
+    userFillsByTime: slowFillsByTime || [],
+    userFunding: slowFunding || []
+  }, Date.now());
+  return applyMarks(state);
+}
+
+function takeClearinghouse(ch) {
+  if (!ch || typeof ch !== "object") return;
+  const nextT = n0(ch.time);
+  const prevT = liveCh ? n0(liveCh.time) : -1;
+  if (!liveCh || nextT >= prevT) liveCh = ch;
+}
+
+function takeSpot(spot, force) {
+  if (!spot || typeof spot !== "object") return;
+  if (force || !acctWsLive || !liveSpot) liveSpot = spot;
+}
+
+function takeOrders(orders, force) {
+  if (!Array.isArray(orders)) return;
+  if (force || !acctWsLive || !liveOrders) liveOrders = orders;
+}
+
+function stampUpdate() {
+  lastOk = Date.now();
+  const el = $("updated");
+  if (!el) return;
+  el.textContent = "最後更新：" + formatTaipei(lastOk);
+  el.setAttribute("data-ms", String(lastOk));
+}
+
+function applyFrame() {
+  try {
+    const state = accountState();
+    if (!state) return;
+    renderFast(state);
+    stampUpdate();
+  } catch (err) { /* keep the last good frame */ }
+}
+
+function paintFeedLabel() {
+  const hidden = document.visibilityState === "hidden";
+  const feed = hidden ? "paused" : acctFeed;
+  const labels = {
+    paused: "分頁在背景，已暫停",
+    ws: "每秒更新",
+    poll: "每秒輪詢",
+    backoff: "限流，稍後再試",
+    down: "重新連線",
+    boot: "每秒更新"
+  };
+  const el = $("countdown");
+  if (el) {
+    el.textContent = labels[feed] || "每秒更新";
+    el.setAttribute("data-feed", feed);
+  }
+  if (feed === shownFeed) return;
+  shownFeed = feed;
+  if (feed === "ws") setStatus("ok", "即時");
+  else if (feed === "poll") setStatus("ok", "輪詢");
+  else if (feed === "backoff") setStatus("busy", "限流");
+  else if (feed === "down") setStatus("err", "重新連線");
+}
+
+function stopFallback() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+  pollDelay = 1000;
+}
+
+function startFallback() {
+  if (pollTimer || acctWsLive) return;
+  const run = async function () {
+    pollTimer = null;
+    if (document.visibilityState === "hidden" || acctWsLive) return;
+    let wait = 1000;
+    if (!inFlight) {
+      try {
+        const results = await Promise.all([
+          hl({ type: "clearinghouseState", user: ADDR }),
+          hl({ type: "spotClearinghouseState", user: ADDR }),
+          hl({ type: "frontendOpenOrders", user: ADDR })
+        ]);
+        takeClearinghouse(results[0]);
+        takeSpot(results[1], true);
+        takeOrders(results[2], true);
+        acctFeed = "poll";
+        pollDelay = 1000;
+        wait = 1000;
+        paintFeedLabel();
+      } catch (err) {
+        const msg = (err && err.message) ? err.message : String(err);
+        if (msg.indexOf("429") >= 0) {
+          pollDelay = Math.min(30000, Math.max(2000, pollDelay * 2));
+          acctFeed = "backoff";
+          wait = pollDelay;
+          paintFeedLabel();
+        } else {
+          wait = Math.min(5000, pollDelay + 1000);
+        }
+      }
+    }
+    if (!acctWsLive && document.visibilityState !== "hidden") {
+      pollTimer = setTimeout(run, wait);
+    }
+  };
+  pollTimer = setTimeout(run, 0);
+}
+
+function onAcctMessage(msg) {
+  if (!msg || msg.channel === "subscriptionResponse" || msg.channel === "pong") return;
+  if (msg.channel === "clearinghouseState") {
+    const ch = msg.data && msg.data.clearinghouseState;
+    if (ch) {
+      takeClearinghouse(ch);
+      acctWsLive = true;
+      acctFeed = "ws";
+      acctDelay = 1000;
+      stopFallback();
+      paintFeedLabel();
+    }
+    return;
+  }
+  if (msg.channel === "spotState") {
+    const spot = msg.data && (msg.data.spotState || msg.data.spotClearinghouseState);
+    if (spot) liveSpot = spot;
+    return;
+  }
+  if (msg.channel === "openOrders") {
+    const orders = msg.data && (msg.data.orders || msg.data.openOrders);
+    if (Array.isArray(orders)) liveOrders = orders;
+    return;
+  }
+  if (msg.channel === "activeAssetCtx") {
+    const data = msg.data || {};
+    const mark = num(data.ctx && data.ctx.markPx);
+    if (data.coin && Number.isFinite(mark)) marks[data.coin] = mark;
+    return;
+  }
+  if (msg.channel === "allMids") {
+    const book = (msg.data && msg.data.mids) || {};
+    Object.keys(book).forEach(function (coin) {
+      if (!Number.isFinite(num(marks[coin]))) marks[coin] = num(book[coin]);
+    });
+  }
+}
+
+function sendAcctSubs(socket) {
+  const user = String(ADDR).toLowerCase();
+  const subs = [
+    { type: "clearinghouseState", user: user },
+    { type: "spotState", user: user },
+    { type: "openOrders", user: user },
+    { type: "allMids" }
+  ];
+  ACCT_COINS.forEach(function (coin) {
+    subs.push({ type: "activeAssetCtx", coin: coin });
+  });
+  subs.forEach(function (subscription) {
+    socket.send(JSON.stringify({ method: "subscribe", subscription: subscription }));
+  });
+}
+
+function openAcctSocket() {
+  if (acctWs && (acctWs.readyState === WebSocket.OPEN || acctWs.readyState === WebSocket.CONNECTING)) return;
+  let socket;
+  try {
+    socket = new WebSocket("wss://api.hyperliquid.xyz/ws");
+  } catch (err) {
+    acctFeed = "down";
+    paintFeedLabel();
+    startFallback();
+    scheduleAcctReconnect();
+    return;
+  }
+  acctWs = socket;
+  socket.onopen = function () {
+    acctDelay = 1000;
+    sendAcctSubs(socket);
+  };
+  socket.onmessage = function (ev) {
+    let msg = null;
+    try { msg = JSON.parse(ev.data); } catch (err) { return; }
+    onAcctMessage(msg);
+  };
+  socket.onerror = function () {};
+  socket.onclose = function () {
+    if (acctWs === socket) acctWs = null;
+    acctWsLive = false;
+    if (acctFeed === "ws") acctFeed = "down";
+    paintFeedLabel();
+    startFallback();
+    scheduleAcctReconnect();
+  };
+}
+
+function scheduleAcctReconnect() {
+  if (acctReconnect) return;
+  const wait = acctDelay;
+  acctDelay = Math.min(15000, acctDelay * 2);
+  acctReconnect = setTimeout(function () {
+    acctReconnect = null;
+    if (document.visibilityState === "hidden") return;
+    openAcctSocket();
+  }, wait);
+}
 
 async function refresh(manual) {
   if (inFlight) return;
   inFlight = true;
-  if (manual) $("refresh-btn").disabled = true;
-  setStatus("busy", "更新中…");
+  if (manual) {
+    $("refresh-btn").disabled = true;
+    setStatus("busy", "更新中…");
+  }
   const now = Date.now();
   const startDay = taipeiMidnightMs(now);
   const startFunding = now - 7 * 24 * 60 * 60 * 1000;
@@ -1388,48 +1653,72 @@ async function refresh(manual) {
       hl({ type: "userFunding", user: ADDR, startTime: startFunding }),
       loadDailyHistory()
     ]);
-    const snapshot = {
-      userAbstraction: results[0],
-      clearinghouseState: results[1],
-      spotClearinghouseState: results[2],
-      frontendOpenOrders: results[3],
-      userFills: results[4],
-      userFillsByTime: results[5],
-      userFunding: results[6]
-    };
-    const state = parseAccount(snapshot, now);
-    renderAll(state);
-    lastOk = Date.now();
-    $("updated").textContent = "最後更新：" + formatTaipei(lastOk);
+    if (typeof results[0] === "string") slowMode = results[0];
+    takeClearinghouse(results[1]);
+    takeSpot(results[2], !!manual || !acctWsLive);
+    takeOrders(results[3], !!manual || !acctWsLive);
+    slowFills = results[4];
+    slowFillsByTime = results[5];
+    slowFunding = results[6];
+    const state = accountState();
+    if (state) renderAll(state);
+    stampUpdate();
     $("banner").classList.remove("show");
     $("banner").textContent = "";
-    setStatus("ok", "已連線");
+    if (acctFeed === "boot") setStatus("ok", "已連線");
+    paintFeedLabel();
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
+    if (msg.indexOf("429") >= 0) {
+      pollDelay = Math.min(30000, Math.max(2000, pollDelay * 2));
+      acctFeed = "backoff";
+      paintFeedLabel();
+    }
     $("banner").textContent = "無法更新資料：" + msg + (lastOk ? "。仍顯示上一次成功的結果。" : "。請確認網路連線，或改用本機網頁伺服器開啟此檔。");
     $("banner").classList.add("show");
-    setStatus("err", "連線失敗");
+    if (!lastOk) setStatus("err", "連線失敗");
   } finally {
     inFlight = false;
-    $("refresh-btn").disabled = false;
+    if ($("refresh-btn")) $("refresh-btn").disabled = false;
   }
 }
 
-function startCountdown() {
-  if (tickTimer) clearInterval(tickTimer);
-  tickTimer = setInterval(function () {
-    if (!lastOk) {
-      $("countdown").textContent = "每 15 秒自動更新";
-      return;
+async function refreshSlow() {
+  if (inFlight || document.visibilityState === "hidden") return;
+  inFlight = true;
+  const now = Date.now();
+  try {
+    const results = await Promise.all([
+      hl({ type: "userAbstraction", user: ADDR }),
+      hl({ type: "userFills", user: ADDR }),
+      hl({ type: "userFillsByTime", user: ADDR, startTime: taipeiMidnightMs(now) }),
+      hl({ type: "userFunding", user: ADDR, startTime: now - 7 * 24 * 60 * 60 * 1000 }),
+      loadDailyHistory()
+    ]);
+    if (typeof results[0] === "string") slowMode = results[0];
+    slowFills = results[1];
+    slowFillsByTime = results[2];
+    slowFunding = results[3];
+    const state = accountState();
+    if (state) renderAll(state);
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    if (msg.indexOf("429") >= 0) {
+      acctFeed = acctWsLive ? "ws" : "backoff";
+      paintFeedLabel();
     }
-    const remain = Math.max(0, Math.ceil((POLL_MS - (Date.now() - lastOk)) / 1000));
-    $("countdown").textContent = remain > 0 ? (remain + " 秒後自動更新") : "即將更新…";
-  }, 250);
+  } finally {
+    inFlight = false;
+  }
 }
 
-function loop() {
-  if (document.visibilityState === "hidden") return;
-  refresh(false);
+function startLiveClock() {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = setInterval(function () {
+    paintFeedLabel();
+    if (document.visibilityState === "hidden") return;
+    applyFrame();
+  }, RENDER_MS);
 }
 
 function boot() {
@@ -1447,12 +1736,26 @@ function boot() {
   });
   $("refresh-btn").addEventListener("click", function () { refresh(true); });
   document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "visible") refresh(false);
+    paintFeedLabel();
+    if (document.visibilityState === "hidden") {
+      stopFallback();
+      return;
+    }
+    applyFrame();
+    if (!acctWs || acctWs.readyState === WebSocket.CLOSED) openAcctSocket();
+    if (!acctWsLive) startFallback();
+    refreshSlow();
   });
   refresh(false);
   loadRiskLimits();
-  timer = setInterval(loop, POLL_MS);
-  startCountdown();
+  openAcctSocket();
+  startLiveClock();
+  slowTimer = setInterval(refreshSlow, SLOW_MS);
+  setInterval(function () {
+    if (acctWs && acctWs.readyState === WebSocket.OPEN) {
+      acctWs.send(JSON.stringify({ method: "ping" }));
+    }
+  }, 30000);
   bootChart();
 }
 
