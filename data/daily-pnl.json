@@ -44,10 +44,10 @@
       "date": "2026-11-23",
       "fees": 0.095447,
       "fills": 1,
-      "funding": 0.001002,
+      "funding": 0.020601,
       "losses": 1,
-      "pct": -2.9397,
-      "pnl": -2.348455,
+      "pct": -2.9152,
+      "pnl": -2.328856,
       "startEquity": 79.887863,
       "startEquityApprox": true,
       "startEquityMs": 1795359360075,
@@ -59,7 +59,7 @@
   ],
   "method": "sum(closedPnl) - USDC fill fees + funding; deposits and withdrawals excluded",
   "timezone": "Asia/Taipei",
-  "updatedAt": "2026-11-23T03:26:35+08:00",
-  "updatedAtMs": 1795375595786,
+  "updatedAt": "2026-11-23T05:41:51+08:00",
+  "updatedAtMs": 1795383711752,
   "version": 1
 }
