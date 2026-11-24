@@ -74,9 +74,47 @@
     .status-text { font-size: 13px; color: var(--muted); }
     .updated { font-size: 12px; color: var(--faint); }
     .addr {
-      display: inline-flex; align-items: center; gap: 8px;
-      font-family: var(--mono); font-size: 12px; color: var(--muted);
+      display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 0;
     }
+    .wallet { display: flex; flex-direction: column; gap: 8px; min-width: 0; max-width: 100%; }
+    .wallet-current { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+    .wallet-name { font-weight: 650; font-size: 14px; letter-spacing: 0.02em; }
+    .wallet-panel {
+      background: var(--bg-elev); border: 1px solid var(--line-soft);
+      border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .wallet-panel[hidden] { display: none; }
+    .wallet-list { display: flex; flex-direction: column; gap: 6px; }
+    .wallet-row {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+      padding: 6px 8px; border-radius: 10px; background: var(--bg-elev-2);
+    }
+    .wallet-row.is-on { outline: 1px solid var(--gold); }
+    .wallet-pick {
+      appearance: none; border: 0; background: transparent; color: var(--text);
+      font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+      flex: 1 1 140px; min-width: 0; padding: 4px 2px;
+    }
+    .wallet-pick small { display: block; color: var(--faint); font-family: var(--mono); font-size: 11px; }
+    .wallet-form { display: flex; flex-wrap: wrap; gap: 8px; }
+    .wallet-form input {
+      flex: 1 1 160px; min-width: 0; background: var(--bg); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+      font: inherit; font-size: 13px;
+    }
+    .wallet-form input.wallet-addr { flex: 1 1 240px; font-family: var(--mono); }
+    .wallet-error { margin: 0; min-height: 1.2em; color: var(--red); font-size: 12px; }
+    .wallet-rename {
+      flex: 1 1 120px; min-width: 0; background: var(--bg); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 13px;
+    }
+    .wallet-note {
+      display: none; margin: 0 0 16px; padding: 10px 14px; border-radius: 10px;
+      background: var(--gold-dim); color: var(--gold);
+      border: 1px solid rgba(212, 165, 116, 0.35); font-size: 13px; line-height: 1.5;
+    }
+    .wallet-note.show { display: block; }
     .btn {
       appearance: none; border: 1px solid var(--line); background: var(--bg-elev-2);
       color: var(--text); border-radius: 8px; padding: 5px 10px; font: inherit;
@@ -266,6 +304,9 @@
       .bar-meta { flex-direction: column; align-items: stretch; gap: 4px; }
       .chart-px { font-size: 22px; }
       .chart-canvas { height: 300px; }
+      .wallet-form { flex-direction: column; }
+      .wallet-form input, .wallet-form .btn { width: 100%; }
+      .wallet-row .btn { flex: 1 1 auto; }
     }
     @media (hover: none), (max-width: 520px) {
       .chart-float, .chart-float button { opacity: 1; pointer-events: auto; }
@@ -283,10 +324,25 @@
           <span class="pill">唯讀</span>
           <span>唯讀頁面，只讀公開資料，不能下單。</span>
         </div>
-        <div class="addr">
-          <span id="addr-short"></span>
-          <button class="btn" type="button" id="copy-btn">複製地址</button>
-          <a id="explorer" target="_blank" rel="noopener noreferrer">在 Hyperliquid 查看</a>
+        <div class="wallet" id="wallet" data-wallet="">
+          <div class="wallet-current">
+            <span class="pill" id="wallet-kind">主錢包</span>
+            <span class="wallet-name" id="wallet-name">主錢包</span>
+            <span class="addr" id="addr-short"></span>
+            <button class="btn" type="button" id="copy-btn">複製地址</button>
+            <a id="explorer" target="_blank" rel="noopener noreferrer">在 Hyperliquid 查看</a>
+            <button class="btn" type="button" id="wallet-home" hidden>回到主錢包</button>
+            <button class="btn" type="button" id="wallet-toggle" aria-expanded="false" aria-controls="wallet-panel">錢包</button>
+          </div>
+          <div class="wallet-panel" id="wallet-panel" hidden>
+            <div class="wallet-list" id="wallet-list"></div>
+            <form class="wallet-form" id="wallet-form">
+              <input class="wallet-addr" id="wallet-addr" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x 開頭、40 個十六進位字元" aria-label="錢包地址">
+              <input id="wallet-label" type="text" maxlength="24" autocomplete="off" placeholder="暱稱（可空白）" aria-label="錢包暱稱">
+              <button class="btn" type="submit">查看並儲存</button>
+            </form>
+            <p class="wallet-error" id="wallet-error" role="alert"></p>
+          </div>
         </div>
       </div>
       <div class="meta">
@@ -301,6 +357,7 @@
     </header>
 
     <div class="banner" id="banner"></div>
+    <div class="wallet-note" id="wallet-note"></div>
 
     <section class="block" id="chart-block">
       <div class="block-head">
@@ -358,7 +415,7 @@
     <section class="block">
       <div class="block-head">
         <h2>風險限額</h2>
-        <div class="sub">由你在 Risk Manager 設定，此處只做展示、不會改動</div>
+        <div class="sub" id="risk-sub">由你在 Risk Manager 設定，此處只做展示、不會改動</div>
       </div>
       <div class="card">
         <div class="limits" id="risk-limits">
@@ -379,7 +436,7 @@
     <section class="block" id="calendar-block">
       <div class="block-head">
         <h2>每日損益</h2>
-        <div class="sub">每日結算：台北 00:00 · 含手動交易，永久記錄</div>
+        <div class="sub" id="cal-sub">每日結算：台北 00:00 · 含手動交易，永久記錄</div>
       </div>
       <div class="card" id="calendar-card">
         <div class="empty">載入日曆中…</div>
@@ -426,7 +483,11 @@
   <script src="https://unpkg.com/lightweight-charts@5.3.0/dist/lightweight-charts.standalone.production.js"></script>
   <script>
 /* PARSE_START */
-const ADDR = "0xc70E03319051E7C4CE2556c064022090869012e4";
+const DESK_ADDR = "0xc70E03319051E7C4CE2556c064022090869012e4";
+const WALLET_KEY = "tf-wallets";
+let activeAddr = DESK_ADDR;
+let acctGen = 0;
+let inFlightGen = 0;
 const API = "https://api.hyperliquid.xyz/info";
 const RENDER_MS = 1000;
 const SLOW_MS = 15000;
@@ -737,7 +798,9 @@ function renderOverview(s) {
     { label: "已用保證金", value: fmtMoney(s.marginUsed), hint: "目前持倉占用的保證金", extra: "" },
     { label: "可出金／可用", value: fmtMoney(after), hint: "現貨維持保證金後可用 " + fmtMoney(after) + "；永續可出金 " + fmtMoney(s.withdrawable), extra: "" },
     { label: "帳戶權益（不重複加總）", value: fmtMoney(s.equity), hint: s.unified ? "統一帳戶：現貨 USDC 就是帳戶權益，已含未實現損益，不與永續帳戶權益相加" : "現貨 USDC＋永續帳戶權益", extra: s.upnl ? ("未實現損益 " + fmtMoney(s.upnl) + "，已含在權益內") : "" },
-    { label: "今日本金", value: (function () { const b = equityBasis(s.equity); return b ? fmtMoney(b.value) : "—"; })(), hint: "當日 00:00 台北時間的帳戶權益，風險按這筆計算", extra: (function () { const b = equityBasis(s.equity); return b ? basisNote(b) : ""; })() }
+    isDeskWallet()
+      ? { label: "今日本金", value: (function () { const b = equityBasis(s.equity); return b ? fmtMoney(b.value) : "—"; })(), hint: "當日 00:00 台北時間的帳戶權益，風險按這筆計算", extra: (function () { const b = equityBasis(s.equity); return b ? basisNote(b) : ""; })() }
+      : { label: "查看中", value: walletLabel(activeAddr), hint: "這不是主錢包。交易台風險限額與每日紀錄都不套用在這裡。", extra: "" }
   ];
   $("overview").innerHTML = cards.map(function (c) {
     return '<div class="card"><div class="label">' + esc(c.label) + '</div><div class="value">' + esc(c.value) + '</div><div class="hint">' + esc(c.hint) + (c.extra ? "<br>" + esc(c.extra) : "") + "</div></div>";
@@ -746,10 +809,11 @@ function renderOverview(s) {
 
 function renderPnl(s) {
   const net = s.day.net;
-  const basis = equityBasis(s.equity);
-  const pct = riskDoc ? num(riskDoc.dailyStopPct) : NaN;
+  const desk = isDeskWallet();
+  const basis = desk ? equityBasis(s.equity) : null;
+  const pct = desk && riskDoc ? num(riskDoc.dailyStopPct) : NaN;
   const stop = basis && Number.isFinite(pct) ? basis.value * pct / 100 : NaN;
-  const haveStop = Number.isFinite(stop) && stop < 0;
+  const haveStop = desk && Number.isFinite(stop) && stop < 0;
   const toward = haveStop ? Math.min(1, Math.max(0, net / stop)) : 0;
   let fillCls = "bar-fill";
   let status = haveStop
@@ -770,14 +834,20 @@ function renderPnl(s) {
         '<div class="hint">已實現 ' + esc(fmtMoney(s.day.realized)) + ' − 手續費 ' + esc(fmtMoney(s.day.fees)) + '，共 ' + s.day.count + ' 筆今日成交' +
         (s.day.skippedNonUsdcFee ? "；有非 USDC 手續費未計入" : "") + "</div></div>" +
       '<div><div class="label">未實現損益</div><div class="value sm ' + clsPnL(s.upnl) + '">' + esc(fmtMoney(s.upnl)) + '</div>' +
-        '<div class="hint">合計參考 ' + '<span class="' + clsPnL(net + s.upnl) + '">' + esc(fmtMoney(net + s.upnl)) + "</span>；進度條依已實現損益對每日停損計算</div></div>" +
+        '<div class="hint">合計參考 ' + '<span class="' + clsPnL(net + s.upnl) + '">' + esc(fmtMoney(net + s.upnl)) + "</span>" +
+        (desk ? "；進度條依已實現損益對每日停損計算" : "。這個錢包不套用主錢包的每日停損") + "</div></div>" +
     "</div>" +
-    '<div class="bar-wrap"><div class="bar-track"><div class="' + fillCls + '" style="width:' + (toward * 100).toFixed(1) + '%"></div></div>' +
-    '<div class="bar-meta"><span>' + esc(status) + "</span><span>每日停損 " + (haveStop ? esc(fmtMoney(stop)) : "—") + "</span></div></div>";
+    (desk
+      ? ('<div class="bar-wrap"><div class="bar-track"><div class="' + fillCls + '" style="width:' + (toward * 100).toFixed(1) + '%"></div></div>' +
+        '<div class="bar-meta"><span>' + esc(status) + "</span><span>每日停損 " + (haveStop ? esc(fmtMoney(stop)) : "—") + "</span></div></div>")
+      : '<div class="hint">今日損益由這個地址的成交現算：已實現損益減 USDC 手續費，再加資金費。</div>') +
+    "";
 }
 
 function renderPositions(s) {
-  $("pos-count").textContent = s.positions.length ? (s.positions.length + " / 8 倉") : "";
+  $("pos-count").textContent = s.positions.length
+    ? (isDeskWallet() ? (s.positions.length + " / 8 倉") : (s.positions.length + " 倉"))
+    : "";
   if (!s.positions.length) {
     $("positions-card").innerHTML = '<div class="empty">目前沒有持倉</div>';
     return;
@@ -890,6 +960,7 @@ function riskChip(label, strong, rest) {
 }
 
 function equityBasis(live) {
+  if (!isDeskWallet()) return null;
   const today = taipeiDateStr(Date.now());
   const day = (histDays || []).find(function (d) { return d && d.date === today; });
   const snap = day ? num(day.startEquity) : NaN;
@@ -949,7 +1020,25 @@ function leverageCapNote(doc) {
 
 function renderRiskLimits(doc, account) {
   const host = $("risk-limits");
-  if (!host || !doc) return;
+  if (!host) return;
+  if (!isDeskWallet()) {
+    const live = account ? num(account.equity) : NaN;
+    host.innerHTML = [
+      '<span class="chip">風險限額只屬於 <b>主錢包</b></span>',
+      '<span class="chip">目前查看 <b>' + esc(walletLabel(activeAddr)) + "</b></span>",
+      '<span class="chip">這個地址的權益 <b>' + esc(Number.isFinite(live) ? fmtMoney(live) : "—") + "</b></span>",
+      '<span class="chip">這裡不套用主錢包的每筆風險、總風險或每日停損</span>'
+    ].join("");
+    host.setAttribute("data-ready", "guest");
+    host.setAttribute("data-scope", "guest");
+    host.setAttribute("data-live", Number.isFinite(live) ? String(live) : "");
+    ["data-version", "data-leverage", "data-risk-pct", "data-total-pct", "data-stop-pct", "data-basis", "data-approx", "data-fallback", "data-risk-usd", "data-total-usd", "data-stop-usd"].forEach(function (key) {
+      host.removeAttribute(key);
+    });
+    return;
+  }
+  if (!doc) return;
+  host.setAttribute("data-scope", "desk");
   const coins = Array.isArray(doc.coins) ? doc.coins.filter(Boolean) : [];
   const capText = leverageCapNote(doc);
   const levRest = capText ? "（不超過各幣上限，" + capText + "）" : "（不超過各幣上限）";
@@ -1191,15 +1280,112 @@ function formatZhDate(ymd) {
 }
 
 async function loadDailyHistory() {
+  if (!isDeskWallet()) return;
+  const gen = acctGen;
   try {
     const res = await fetch(HIST_URL + "?t=" + taipeiDateStr(Date.now()), { cache: "no-cache" });
+    if (gen !== acctGen || !isDeskWallet()) return;
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
+    if (gen !== acctGen || !isDeskWallet()) return;
     histDays = Array.isArray(data.days) ? data.days : [];
     histLoadedAt = Date.now();
     histError = "";
   } catch (err) {
+    if (gen !== acctGen || !isDeskWallet()) return;
     if (!histDays.length) histError = "尚無永久紀錄檔，先顯示今日即時資料。";
+  }
+}
+
+async function pageByTime(type, user, gen, start, pageCap) {
+  const out = [];
+  const seen = {};
+  let cur = start;
+  let truncated = false;
+  for (let i = 0; i < 4; i++) {
+    if (gen !== acctGen) return null;
+    const batch = await hl({ type: type, user: user, startTime: cur });
+    if (gen !== acctGen) return null;
+    if (!Array.isArray(batch) || !batch.length) break;
+    let maxT = cur;
+    let added = 0;
+    batch.forEach(function (row) {
+      const coin = row && row.delta ? row.delta.coin : "";
+      const key = type + "|" + n0(row && row.time) + "|" + (row && row.tid != null ? row.tid : (row && row.hash ? row.hash : String(coin) + ":" + out.length));
+      if (seen[key]) return;
+      seen[key] = 1;
+      out.push(row);
+      added += 1;
+      if (n0(row && row.time) > maxT) maxT = n0(row.time);
+    });
+    const full = type === "userFillsByTime" ? batch.length >= 2000 : batch.length >= (pageCap || 500);
+    if (!full || added === 0 || maxT <= cur) break;
+    if (i === 3) truncated = true;
+    cur = maxT;
+  }
+  return { rows: out, truncated: truncated };
+}
+
+function buildGuestDays(fills, funding) {
+  const buckets = {};
+  function bucket(day) {
+    if (!buckets[day]) buckets[day] = { fills: [], funding: 0, oids: {} };
+    return buckets[day];
+  }
+  (fills || []).forEach(function (f) {
+    const t = n0(f && f.time);
+    if (t <= 0) return;
+    const b = bucket(taipeiDateStr(t));
+    b.fills.push(f);
+    if (f.oid != null) b.oids[String(f.oid)] = true;
+  });
+  (funding || []).forEach(function (row) {
+    const t = n0(row && row.time);
+    if (t <= 0) return;
+    bucket(taipeiDateStr(t)).funding += n0(row.delta && row.delta.usdc);
+  });
+  const today = taipeiDateStr(Date.now());
+  return Object.keys(buckets).sort().map(function (date) {
+    const b = buckets[date];
+    const stats = realizedFromFills(b.fills, 0);
+    const win = closedTradeStats(b.fills);
+    return {
+      date: date,
+      pnl: stats.net + b.funding,
+      pct: null,
+      startValue: null,
+      closedPnl: stats.realized,
+      fees: stats.fees,
+      funding: b.funding,
+      trades: Object.keys(b.oids).length,
+      fills: b.fills.length,
+      wins: win.wins,
+      losses: win.losses,
+      win_rate: win.win_rate,
+      complete: date < today
+    };
+  });
+}
+
+async function loadGuestHistory(gen, user) {
+  if (gen !== acctGen || isDeskWallet()) return;
+  const start = Date.now() - 120 * 24 * 60 * 60 * 1000;
+  try {
+    const fills = await pageByTime("userFillsByTime", user, gen, start, 2000);
+    const funding = await pageByTime("userFunding", user, gen, start, 500);
+    if (!fills || !funding || gen !== acctGen || isDeskWallet()) return;
+    histDays = buildGuestDays(fills.rows, funding.rows);
+    histLoadedAt = Date.now();
+    histError = (fills.truncated || funding.truncated)
+      ? "公開成交很多，日曆只含最近抓到的一段，不是主錢包的永久紀錄。"
+      : "";
+    const state = accountState();
+    if (state && gen === acctGen) renderCalendar(state);
+  } catch (err) {
+    if (gen !== acctGen || isDeskWallet()) return;
+    histError = "這個地址的每日損益暫時無法載入。";
+    const state = accountState();
+    if (state) renderCalendar(state);
   }
 }
 
@@ -1286,7 +1472,11 @@ function renderCalendar(s) {
     html += "</div>";
   });
   html += "</div></div></div>";
-  html += '<div class="cal-hint">點選或滑過格子可看當日金額、百分比與成交筆數。綠色為獲利、紅色為虧損。</div>';
+  html += '<div class="cal-hint">點選或滑過格子可看當日金額、百分比與成交筆數。綠色為獲利、紅色為虧損。' +
+    (isDeskWallet() ? "" : " 其他錢包的百分比需要開盤權益，這裡只顯示金額。") + "</div>";
+  if (!isDeskWallet()) {
+    html += '<div class="hint">這是這個地址最近約 120 天的公開成交與資金費，按台北 00:00 分日（已實現損益減手續費加資金費），不是主錢包的永久紀錄。</div>';
+  }
   const focus = selectedCalDate || today;
   const focusData = byDate[focus] || (focus === today ? liveToday(s) : null);
   const focusTag = focus === today ? "（今日，進行中）" : "";
@@ -1350,7 +1540,7 @@ function renderFast(s) {
   renderPositions(s);
   renderOrders(s);
   chartSyncPosition(s);
-  if (riskDoc) renderRiskLimits(riskDoc, s);
+  if (riskDoc || !isDeskWallet()) renderRiskLimits(riskDoc, s);
 }
 
 function renderAll(s) {
@@ -1499,15 +1689,18 @@ function startFallback() {
   if (pollTimer || acctWsLive) return;
   const run = async function () {
     pollTimer = null;
+    const gen = acctGen;
+    const user = activeAddr;
     if (document.visibilityState === "hidden" || acctWsLive) return;
     let wait = 1000;
     if (!inFlight) {
       try {
         const results = await Promise.all([
-          hl({ type: "clearinghouseState", user: ADDR }),
-          hl({ type: "spotClearinghouseState", user: ADDR }),
-          hl({ type: "frontendOpenOrders", user: ADDR })
+          hl({ type: "clearinghouseState", user: user }),
+          hl({ type: "spotClearinghouseState", user: user }),
+          hl({ type: "frontendOpenOrders", user: user })
         ]);
+        if (gen !== acctGen) return;
         takeClearinghouse(results[0]);
         takeSpot(results[1], true);
         takeOrders(results[2], true);
@@ -1516,6 +1709,7 @@ function startFallback() {
         wait = 1000;
         paintFeedLabel();
       } catch (err) {
+        if (gen !== acctGen) return;
         const msg = (err && err.message) ? err.message : String(err);
         if (msg.indexOf("429") >= 0) {
           pollDelay = Math.min(30000, Math.max(2000, pollDelay * 2));
@@ -1527,7 +1721,7 @@ function startFallback() {
         }
       }
     }
-    if (!acctWsLive && document.visibilityState !== "hidden") {
+    if (!acctWsLive && document.visibilityState !== "hidden" && gen === acctGen) {
       pollTimer = setTimeout(run, wait);
     }
   };
@@ -1536,6 +1730,8 @@ function startFallback() {
 
 function onAcctMessage(msg) {
   if (!msg || msg.channel === "subscriptionResponse" || msg.channel === "pong") return;
+  const who = msg.data && msg.data.user;
+  if (who && normalizeAddr(who) !== normalizeAddr(activeAddr)) return;
   if (msg.channel === "clearinghouseState") {
     const ch = msg.data && msg.data.clearinghouseState;
     if (ch) {
@@ -1573,7 +1769,8 @@ function onAcctMessage(msg) {
 }
 
 function sendAcctSubs(socket) {
-  const user = String(ADDR).toLowerCase();
+  const user = String(activeAddr).toLowerCase();
+  socket._user = user;
   const subs = [
     { type: "clearinghouseState", user: user },
     { type: "spotState", user: user },
@@ -1586,6 +1783,29 @@ function sendAcctSubs(socket) {
   subs.forEach(function (subscription) {
     socket.send(JSON.stringify({ method: "subscribe", subscription: subscription }));
   });
+}
+
+function closeAcctSocket() {
+  const socket = acctWs;
+  acctWs = null;
+  acctWsLive = false;
+  if (acctReconnect) {
+    clearTimeout(acctReconnect);
+    acctReconnect = null;
+  }
+  if (!socket) return;
+  const user = socket._user;
+  try {
+    if (socket.readyState === WebSocket.OPEN && user) {
+      ["clearinghouseState", "spotState", "openOrders"].forEach(function (type) {
+        socket.send(JSON.stringify({ method: "unsubscribe", subscription: { type: type, user: user } }));
+      });
+    }
+  } catch (err) { /* closing is enough if unsubscribe fails */ }
+  socket.onmessage = function () {};
+  socket.onclose = function () {};
+  socket.onerror = function () {};
+  try { socket.close(); } catch (err) { /* already closed */ }
 }
 
 function openAcctSocket() {
@@ -1633,8 +1853,12 @@ function scheduleAcctReconnect() {
 }
 
 async function refresh(manual) {
-  if (inFlight) return;
+  const gen = acctGen;
+  const user = activeAddr;
+  const desk = isDeskWallet(user);
+  if (inFlight && inFlightGen === gen) return;
   inFlight = true;
+  inFlightGen = gen;
   if (manual) {
     $("refresh-btn").disabled = true;
     setStatus("busy", "更新中…");
@@ -1644,15 +1868,16 @@ async function refresh(manual) {
   const startFunding = now - 7 * 24 * 60 * 60 * 1000;
   try {
     const results = await Promise.all([
-      hl({ type: "userAbstraction", user: ADDR }),
-      hl({ type: "clearinghouseState", user: ADDR }),
-      hl({ type: "spotClearinghouseState", user: ADDR }),
-      hl({ type: "frontendOpenOrders", user: ADDR }),
-      hl({ type: "userFills", user: ADDR }),
-      hl({ type: "userFillsByTime", user: ADDR, startTime: startDay }),
-      hl({ type: "userFunding", user: ADDR, startTime: startFunding }),
-      loadDailyHistory()
+      hl({ type: "userAbstraction", user: user }),
+      hl({ type: "clearinghouseState", user: user }),
+      hl({ type: "spotClearinghouseState", user: user }),
+      hl({ type: "frontendOpenOrders", user: user }),
+      hl({ type: "userFills", user: user }),
+      hl({ type: "userFillsByTime", user: user, startTime: startDay }),
+      hl({ type: "userFunding", user: user, startTime: startFunding }),
+      desk ? loadDailyHistory() : Promise.resolve(null)
     ]);
+    if (gen !== acctGen) return;
     if (typeof results[0] === "string") slowMode = results[0];
     takeClearinghouse(results[1]);
     takeSpot(results[2], !!manual || !acctWsLive);
@@ -1667,7 +1892,9 @@ async function refresh(manual) {
     $("banner").textContent = "";
     if (acctFeed === "boot") setStatus("ok", "已連線");
     paintFeedLabel();
+    if (!desk) loadGuestHistory(gen, user);
   } catch (err) {
+    if (gen !== acctGen) return;
     const msg = (err && err.message) ? err.message : String(err);
     if (msg.indexOf("429") >= 0) {
       pollDelay = Math.min(30000, Math.max(2000, pollDelay * 2));
@@ -1678,23 +1905,29 @@ async function refresh(manual) {
     $("banner").classList.add("show");
     if (!lastOk) setStatus("err", "連線失敗");
   } finally {
-    inFlight = false;
-    if ($("refresh-btn")) $("refresh-btn").disabled = false;
+    if (gen === acctGen) {
+      inFlight = false;
+      if ($("refresh-btn")) $("refresh-btn").disabled = false;
+    }
   }
 }
 
 async function refreshSlow() {
-  if (inFlight || document.visibilityState === "hidden") return;
+  const gen = acctGen;
+  const user = activeAddr;
+  if ((inFlight && inFlightGen === gen) || document.visibilityState === "hidden") return;
   inFlight = true;
+  inFlightGen = gen;
   const now = Date.now();
   try {
     const results = await Promise.all([
-      hl({ type: "userAbstraction", user: ADDR }),
-      hl({ type: "userFills", user: ADDR }),
-      hl({ type: "userFillsByTime", user: ADDR, startTime: taipeiMidnightMs(now) }),
-      hl({ type: "userFunding", user: ADDR, startTime: now - 7 * 24 * 60 * 60 * 1000 }),
-      loadDailyHistory()
+      hl({ type: "userAbstraction", user: user }),
+      hl({ type: "userFills", user: user }),
+      hl({ type: "userFillsByTime", user: user, startTime: taipeiMidnightMs(now) }),
+      hl({ type: "userFunding", user: user, startTime: now - 7 * 24 * 60 * 60 * 1000 }),
+      isDeskWallet(user) ? loadDailyHistory() : Promise.resolve(null)
     ]);
+    if (gen !== acctGen) return;
     if (typeof results[0] === "string") slowMode = results[0];
     slowFills = results[1];
     slowFillsByTime = results[2];
@@ -1702,13 +1935,14 @@ async function refreshSlow() {
     const state = accountState();
     if (state) renderAll(state);
   } catch (err) {
+    if (gen !== acctGen) return;
     const msg = (err && err.message) ? err.message : String(err);
     if (msg.indexOf("429") >= 0) {
       acctFeed = acctWsLive ? "ws" : "backoff";
       paintFeedLabel();
     }
   } finally {
-    inFlight = false;
+    if (gen === acctGen) inFlight = false;
   }
 }
 
@@ -1721,17 +1955,312 @@ function startLiveClock() {
   }, RENDER_MS);
 }
 
+function normalizeAddr(raw) {
+  const s = String(raw || "").trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(s)) return "";
+  return "0x" + s.slice(2).toLowerCase();
+}
+
+function isDeskWallet(addr) {
+  const n = normalizeAddr(addr == null ? activeAddr : addr);
+  return !!n && n === normalizeAddr(DESK_ADDR);
+}
+
+function cleanLabel(raw) {
+  return String(raw || "").replace(/[\u0000-\u001f]/g, "").trim().slice(0, 24);
+}
+
+function loadSaved() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WALLET_KEY) || "[]");
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    const seen = {};
+    raw.forEach(function (row) {
+      const addr = normalizeAddr(row && row.addr);
+      if (!addr || isDeskWallet(addr) || seen[addr]) return;
+      seen[addr] = 1;
+      out.push({ addr: addr, label: cleanLabel(row.label) });
+    });
+    return out;
+  } catch (err) {
+    return [];
+  }
+}
+
+function storeSaved(list) {
+  try {
+    localStorage.setItem(WALLET_KEY, JSON.stringify(list));
+  } catch (err) { /* private mode can refuse storage; viewing still works */ }
+}
+
+function rememberWallet(addr, label) {
+  const n = normalizeAddr(addr);
+  if (!n || isDeskWallet(n)) return;
+  const list = loadSaved().filter(function (row) { return row.addr !== n; });
+  list.unshift({ addr: n, label: cleanLabel(label) });
+  storeSaved(list.slice(0, 24));
+}
+
+function forgetWallet(addr) {
+  const n = normalizeAddr(addr);
+  storeSaved(loadSaved().filter(function (row) { return row.addr !== n; }));
+  renderWalletList();
+}
+
+function renameWallet(addr, label) {
+  const n = normalizeAddr(addr);
+  const list = loadSaved().map(function (row) {
+    if (row.addr !== n) return row;
+    return { addr: row.addr, label: cleanLabel(label) };
+  });
+  storeSaved(list);
+  paintWalletChrome();
+}
+
+function walletLabel(addr) {
+  if (isDeskWallet(addr)) return "主錢包";
+  const n = normalizeAddr(addr == null ? activeAddr : addr);
+  const found = loadSaved().find(function (row) { return row.addr === n; });
+  if (found && found.label) return found.label;
+  return shortAddr(n || DESK_ADDR);
+}
+
+function writeWalletQuery() {
+  try {
+    const url = new URL(location.href);
+    if (isDeskWallet()) url.searchParams.delete("wallet");
+    else url.searchParams.set("wallet", normalizeAddr(activeAddr));
+    history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch (err) { /* keep the current URL if it cannot be rewritten */ }
+}
+
+function paintWalletChrome() {
+  const desk = isDeskWallet();
+  const host = $("wallet");
+  if (host) {
+    host.setAttribute("data-wallet", desk ? "desk" : "guest");
+    host.setAttribute("data-addr", normalizeAddr(activeAddr));
+  }
+  const kind = $("wallet-kind");
+  if (kind) kind.textContent = desk ? "主錢包" : "其他錢包";
+  const name = $("wallet-name");
+  if (name) name.textContent = walletLabel(activeAddr);
+  const shown = desk ? DESK_ADDR : normalizeAddr(activeAddr);
+  const short = $("addr-short");
+  if (short) short.textContent = shortAddr(shown);
+  const explorer = $("explorer");
+  if (explorer) explorer.href = "https://app.hyperliquid.xyz/explorer/address/" + shown;
+  const home = $("wallet-home");
+  if (home) {
+    if (desk) home.setAttribute("hidden", "");
+    else home.removeAttribute("hidden");
+  }
+  const note = $("wallet-note");
+  if (note) {
+    if (desk) {
+      note.classList.remove("show");
+      note.textContent = "";
+    } else {
+      note.classList.add("show");
+      note.textContent = "目前查看其他錢包「" + walletLabel(activeAddr) + "」。主錢包的每日損益紀錄與風險限額不會套用在這個地址。";
+    }
+  }
+  const riskSub = $("risk-sub");
+  if (riskSub) {
+    riskSub.textContent = desk
+      ? "由你在 Risk Manager 設定，此處只做展示、不會改動"
+      : "風險限額只套用在主錢包，不會套到這個地址";
+  }
+  const calSub = $("cal-sub");
+  if (calSub) {
+    calSub.textContent = desk
+      ? "每日結算：台北 00:00 · 含手動交易，永久記錄"
+      : "由這個地址的公開成交與資金費現算，台北 00:00 分日";
+  }
+  renderWalletList();
+}
+
+function renderWalletList() {
+  const list = $("wallet-list");
+  if (!list) return;
+  const rows = [{ addr: DESK_ADDR, label: "主錢包", pinned: true }];
+  loadSaved().forEach(function (row) { rows.push(row); });
+  const active = normalizeAddr(activeAddr);
+  if (!isDeskWallet() && !rows.some(function (row) { return normalizeAddr(row.addr) === active; })) {
+    rows.push({ addr: active, label: "", unsaved: true });
+  }
+  list.innerHTML = rows.map(function (row) {
+    const addr = row.pinned ? DESK_ADDR : row.addr;
+    const on = normalizeAddr(addr) === active;
+    const title = row.pinned ? "主錢包" : (row.label || (row.unsaved ? "未儲存" : shortAddr(addr)));
+    let actions = "";
+    if (!row.pinned) {
+      actions += '<button class="btn" type="button" data-act="rename" data-addr="' + esc(addr) + '">改名</button>';
+      if (!row.unsaved) actions += '<button class="btn" type="button" data-act="remove" data-addr="' + esc(addr) + '">移除</button>';
+      else actions += '<button class="btn" type="button" data-act="save" data-addr="' + esc(addr) + '">儲存</button>';
+    }
+    return '<div class="wallet-row' + (on ? " is-on" : "") + '">' +
+      '<button class="wallet-pick" type="button" data-act="open" data-addr="' + esc(addr) + '">' +
+      esc(title) + "<small>" + esc(shortAddr(addr)) + (row.pinned ? " · 固定" : "") + "</small></button>" +
+      actions + "</div>";
+  }).join("");
+}
+
+function resetAccountView() {
+  liveCh = null;
+  liveSpot = null;
+  liveOrders = null;
+  slowMode = "";
+  slowFills = [];
+  slowFillsByTime = [];
+  slowFunding = [];
+  lastAccount = null;
+  histDays = [];
+  histError = "";
+  selectedCalDate = null;
+  acctWsLive = false;
+  acctFeed = "boot";
+  shownFeed = "";
+}
+
+function clearAccountPanels() {
+  ["overview", "pnl-card", "positions-card", "orders-card", "fills-card", "funding-card"].forEach(function (id) {
+    const el = $(id);
+    if (el) el.innerHTML = '<div class="empty">讀取這個錢包…</div>';
+  });
+  const cal = $("calendar-card");
+  if (cal) cal.innerHTML = '<div class="empty">讀取這個錢包的每日損益…</div>';
+  const pos = $("pos-count");
+  if (pos) pos.textContent = "";
+  const risk = $("risk-limits");
+  if (risk) {
+    risk.innerHTML = '<span class="chip">讀取中…</span>';
+    risk.setAttribute("data-ready", "0");
+  }
+}
+
+function switchWallet(addr) {
+  const next = isDeskWallet(addr) ? DESK_ADDR : normalizeAddr(addr);
+  if (!next) return false;
+  if (normalizeAddr(next) === normalizeAddr(activeAddr)) {
+    paintWalletChrome();
+    writeWalletQuery();
+    return true;
+  }
+  activeAddr = next;
+  acctGen += 1;
+  inFlight = false;
+  resetAccountView();
+  stopFallback();
+  closeAcctSocket();
+  clearAccountPanels();
+  paintWalletChrome();
+  writeWalletQuery();
+  openAcctSocket();
+  refresh(true);
+  return true;
+}
+
+function bootWallet() {
+  let invalidQuery = false;
+  try {
+    const q = new URLSearchParams(location.search).get("wallet");
+    if (q) {
+      const n = normalizeAddr(q);
+      if (!n) invalidQuery = true;
+      else if (!isDeskWallet(n)) activeAddr = n;
+    }
+  } catch (err) { invalidQuery = false; }
+  paintWalletChrome();
+  const panel = $("wallet-panel");
+  const toggle = $("wallet-toggle");
+  if (toggle && panel) {
+    toggle.addEventListener("click", function () {
+      const open = panel.hasAttribute("hidden");
+      if (open) panel.removeAttribute("hidden");
+      else panel.setAttribute("hidden", "");
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  }
+  const list = $("wallet-list");
+  if (list) {
+    list.addEventListener("click", function (ev) {
+      const btn = ev.target.closest("[data-act]");
+      if (!btn) return;
+      const act = btn.getAttribute("data-act");
+      const addr = btn.getAttribute("data-addr");
+      if (act === "open") switchWallet(addr);
+      else if (act === "remove") {
+        forgetWallet(addr);
+        if (normalizeAddr(addr) === normalizeAddr(activeAddr)) switchWallet(DESK_ADDR);
+      } else if (act === "save") {
+        rememberWallet(addr, "");
+        paintWalletChrome();
+      } else if (act === "rename") {
+        const row = btn.parentNode;
+        if (!row || row.querySelector(".wallet-rename")) return;
+        const input = document.createElement("input");
+        input.className = "wallet-rename";
+        input.maxLength = 24;
+        input.value = walletLabel(addr) === shortAddr(addr) ? "" : walletLabel(addr);
+        input.placeholder = "新暱稱";
+        input.setAttribute("aria-label", "新暱稱");
+        const save = document.createElement("button");
+        save.className = "btn";
+        save.type = "button";
+        save.textContent = "儲存";
+        save.addEventListener("click", function () {
+          renameWallet(addr, input.value);
+        });
+        row.appendChild(input);
+        row.appendChild(save);
+        input.focus();
+      }
+    });
+  }
+  const form = $("wallet-form");
+  if (form) {
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      const err = $("wallet-error");
+      const addr = normalizeAddr($("wallet-addr").value);
+      if (!addr) {
+        if (err) err.textContent = "請輸入有效的 Hyperliquid 地址：0x 開頭，後面 40 個十六進位字元。";
+        return;
+      }
+      if (err) err.textContent = "";
+      if (isDeskWallet(addr)) {
+        switchWallet(DESK_ADDR);
+      } else {
+        rememberWallet(addr, $("wallet-label").value);
+        switchWallet(addr);
+      }
+      $("wallet-addr").value = "";
+      $("wallet-label").value = "";
+    });
+  }
+  const home = $("wallet-home");
+  if (home) home.addEventListener("click", function () { switchWallet(DESK_ADDR); });
+  if (invalidQuery) {
+    if (panel) panel.removeAttribute("hidden");
+    if (toggle) toggle.setAttribute("aria-expanded", "true");
+    const err = $("wallet-error");
+    if (err) err.textContent = "網址裡的 wallet 不是有效地址。請輸入 0x 開頭、40 個十六進位字元。已留在主錢包。";
+  }
+}
+
 function boot() {
-  $("addr-short").textContent = shortAddr(ADDR);
-  $("explorer").href = "https://app.hyperliquid.xyz/explorer/address/" + ADDR;
+  bootWallet();
   $("copy-btn").addEventListener("click", function () {
+    const shown = isDeskWallet() ? DESK_ADDR : normalizeAddr(activeAddr);
     const done = function () { $("copy-btn").textContent = "已複製"; setTimeout(function () { $("copy-btn").textContent = "複製地址"; }, 1500); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(ADDR).then(done).catch(function () {
-        window.prompt("複製這個地址", ADDR);
+      navigator.clipboard.writeText(shown).then(done).catch(function () {
+        window.prompt("複製這個地址", shown);
       });
     } else {
-      window.prompt("複製這個地址", ADDR);
+      window.prompt("複製這個地址", shown);
     }
   });
   $("refresh-btn").addEventListener("click", function () { refresh(true); });
