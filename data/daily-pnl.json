@@ -76,7 +76,7 @@
     },
     {
       "closedPnl": 0.0,
-      "complete": false,
+      "complete": true,
       "date": "2026-11-25",
       "fees": 0.0,
       "fills": 1,
@@ -91,11 +91,29 @@
       "trades": 1,
       "win_rate": null,
       "wins": 0
+    },
+    {
+      "closedPnl": 0.0,
+      "complete": false,
+      "date": "2026-11-26",
+      "fees": 0.0,
+      "fills": 0,
+      "funding": 0.0,
+      "losses": 0,
+      "pct": null,
+      "pnl": 0.0,
+      "startEquity": 0.013775,
+      "startEquityApprox": true,
+      "startEquityMs": 1795620960058,
+      "startValue": null,
+      "trades": 0,
+      "win_rate": null,
+      "wins": 0
     }
   ],
   "method": "sum(closedPnl) - USDC fill fees + funding; deposits and withdrawals excluded",
   "timezone": "Asia/Taipei",
-  "updatedAt": "2026-11-25T08:34:31+08:00",
-  "updatedAtMs": 1795566871449,
+  "updatedAt": "2026-11-26T05:34:37+08:00",
+  "updatedAtMs": 1795642477525,
   "version": 1
 }
